@@ -246,8 +246,24 @@ def main():
     # separate stop window appears for as long as the autopilot runs.
     manager.sig_agent_running.connect(panel.set_agent_running)
     manager.sig_agent_running.connect(stop_window.set_running)
+    # Before each action: the panel docks opposite the target first (keeping
+    # the stop window uncovered), then the stop window gets out of the way.
+    panel.set_keep_clear_provider(
+        lambda: [stop_window.frameGeometry()] if stop_window.isVisible() else []
+    )
+    manager.sig_agent_target.connect(panel.dock_away_from)
     manager.sig_agent_target.connect(stop_window.avoid_target)
     stop_window.on_stop.connect(manager.cancel_agent)
+
+    # Mode switch — panel and tray stay in sync through the manager
+    panel.on_agent_mode_changed.connect(manager.set_agent_mode)
+    manager.sig_agent_mode.connect(panel.set_agent_mode)
+    manager.sig_agent_mode.connect(tray.set_agent_mode)
+
+    # Checklist, „დავიბენი“, and the autopilot's words as the big caption
+    manager.sig_agent_steps.connect(panel.show_agent_steps)
+    panel.on_agent_lost.connect(manager.agent_request_replan)
+    manager.sig_agent_say.connect(overlay.show_agent_caption)
 
     # Lesson recording
     def _record_start():

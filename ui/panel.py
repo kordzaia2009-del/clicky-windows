@@ -5,13 +5,14 @@ from typing import Callable, Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSizePolicy, QComboBox, QFrame, QLineEdit
+    QPushButton, QScrollArea, QSizePolicy, QComboBox, QFrame, QLineEdit,
+    QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QCursor, QPixmap
 
 from ui.design import (
-    PANEL_QSS, PANEL_WIDTH, PANEL_HEIGHT, PANEL_RADIUS,
+    PANEL_QSS, PANEL_WIDTH, PANEL_HEIGHT, PANEL_RADIUS, RUN_PANEL_WIDTH, RUN_PANEL_HEIGHT,
     STATE_IDLE, STATE_LISTENING, STATE_THINKING, STATE_SPEAKING,
     FONT_TITLE, FONT_STATUS, FONT_RESPONSE, FONT_LABEL,
     SURFACE, TEXT_SECONDARY, BORDER, ANIM_FAST_MS
@@ -200,6 +201,8 @@ class CompanionPanel(QWidget):
     on_text_submitted        = pyqtSignal(str)     # typed question
     on_shown                 = pyqtSignal()        # lets the pointer re-raise above us
     on_agent_reply           = pyqtSignal(str)     # "yes" | "no" | "ready"
+    on_agent_mode_changed    = pyqtSignal(bool)    # True = „გააკეთე“ (do)
+    on_agent_lost            = pyqtSignal()        # „დავიბენი“
     _sig_question            = pyqtSignal(str)
     _sig_error               = pyqtSignal(str)
     on_model_changed         = pyqtSignal(str)
@@ -212,6 +215,11 @@ class CompanionPanel(QWidget):
         super().__init__()
         self._state = AppState.IDLE
         self._agent_running = False
+        self._agent_goals = []
+        self._agent_goal_idx = 0
+        self._agent_steps = []
+        self._agent_step_idx = 0
+        self._keep_clear = lambda: []      # rects the panel must not cover (stop window)
         self._response_text = ""
         self._ollama_installed: dict[str, list[str]] = {"vision": [], "text": []}
         self._ollama_pick: Optional[str] = None
@@ -285,6 +293,25 @@ class CompanionPanel(QWidget):
         header.addWidget(self._min_btn)
         root.addLayout(header)
 
+        # Mode switch: „მაჩვენე“ (guide) / „გააკეთე“ (do) — synced with the tray
+        mode_row = QHBoxLayout()
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_buttons = {}
+        for do, text, tip in ((False, strings_ka.MODE_GUIDE, strings_ka.MODE_GUIDE_TIP),
+                              (True, strings_ka.MODE_DO, strings_ka.MODE_DO_TIP)):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("QPushButton { background: rgba(50,50,62,230); color: rgb(215,215,228); border: 1px solid rgba(90,90,110,200); border-radius: 10px; font-size: 18px; font-weight: 700; padding: 6px; }QPushButton:checked { background: rgb(255,225,77); color: black; border-color: rgb(255,225,77); }")
+            btn.clicked.connect(lambda _=False, d=do: self._on_mode_clicked(d))
+            self._mode_group.addButton(btn)
+            mode_row.addWidget(btn)
+            self._mode_buttons[do] = btn
+        self._mode_buttons[cfg.agent_mode == "do"].setChecked(True)
+        root.addLayout(mode_row)
+
         # Divider
         div = QFrame()
         div.setFrameShape(QFrame.Shape.HLine)
@@ -308,6 +335,20 @@ class CompanionPanel(QWidget):
         self._waveform.setVisible(False)
         root.addWidget(self._waveform)
 
+        # Plan checklist (autopilot runs only): 24 px, high contrast
+        self._checklist = QLabel()
+        self._checklist.setTextFormat(Qt.TextFormat.RichText)
+        self._checklist.setWordWrap(True)
+        self._checklist.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._checklist.setStyleSheet("background: rgb(10,10,14); padding: 8px;"
+                                      "border-radius: 8px;")
+        self._checklist_scroll = QScrollArea()
+        self._checklist_scroll.setWidgetResizable(True)
+        self._checklist_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._checklist_scroll.setWidget(self._checklist)
+        self._checklist_scroll.setVisible(False)
+        root.addWidget(self._checklist_scroll, stretch=2)
+
         # The question being answered (spoken or typed)
         self._question_label = QLabel()
         self._question_label.setWordWrap(True)
@@ -330,6 +371,16 @@ class CompanionPanel(QWidget):
         self._response_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         scroll.setWidget(self._response_label)
         root.addWidget(scroll, stretch=1)
+
+        # Red banner for a "confirm" action, above დიახ / არა
+        self._confirm_banner = QLabel()
+        self._confirm_banner.setWordWrap(True)
+        self._confirm_banner.setStyleSheet(
+            "background: rgb(190,25,25); color: white; border-radius: 8px;"
+            "padding: 10px; font-size: 18px; font-weight: 700;"
+        )
+        self._confirm_banner.setVisible(False)
+        root.addWidget(self._confirm_banner)
 
         # Autopilot answers — shown only while it waits for the person
         agent_row = QHBoxLayout()
@@ -380,7 +431,20 @@ class CompanionPanel(QWidget):
         self._ptt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._ptt_btn.setToolTip(f"ან თქვით „კლიპიტაური“, ან დააჭირეთ {_hotkey_label()}")
         self._ptt_btn.clicked.connect(self.on_ask_clicked)
-        root.addWidget(self._ptt_btn)
+        self._lost_btn = QPushButton(strings_ka.LOST_BUTTON)
+        self._lost_btn.setToolTip(strings_ka.LOST_TIP)
+        self._lost_btn.setFixedHeight(48)
+        self._lost_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._lost_btn.setStyleSheet(
+            "QPushButton { background: rgb(255,170,30); color: black; border: none;"
+            "border-radius: 10px; font-size: 17px; font-weight: 700; padding: 0 12px; }"
+        )
+        self._lost_btn.clicked.connect(self.on_agent_lost)
+        self._lost_btn.setVisible(False)
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self._lost_btn)
+        bottom_row.addWidget(self._ptt_btn, stretch=1)
+        root.addLayout(bottom_row)
 
         # Footer: model selector + provider info
         footer = QHBoxLayout()
@@ -405,6 +469,7 @@ class CompanionPanel(QWidget):
         footer.addWidget(lbl)
         footer.addWidget(self._model_combo, stretch=1)
         root.addLayout(footer)
+        self._footer_widgets = [lbl, self._model_combo]   # hidden during a run
 
     def _populate_models(self):
         self._set_models_for(cfg.llm_provider())
@@ -499,10 +564,10 @@ class CompanionPanel(QWidget):
         self._set_models_for(provider)
 
     def _position_bottom_right(self):
-        from PyQt6.QtWidgets import QApplication
-        screen = QApplication.primaryScreen().geometry()
-        x = screen.right() - PANEL_WIDTH - 24
-        y = screen.bottom() - PANEL_HEIGHT - 60
+        # Current size: the panel is larger while the autopilot runs.
+        a = self._avail()
+        x = a.right() - self.width() - 24
+        y = max(a.top() + 16, a.bottom() - self.height() - 20)
         self.move(x, y)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -568,9 +633,75 @@ class CompanionPanel(QWidget):
 
     def set_agent_running(self, running: bool):
         """While the autopilot runs the big button is a stop button, even
-        when the app itself is idle (waiting for დიახ / მზად ვარ)."""
+        when the app itself is idle (waiting for დიახ / მზად ვარ), and the
+        panel grows to show the checklist in large type."""
         self._agent_running = bool(running)
         self._update_ptt_label()
+        self._lost_btn.setVisible(self._agent_running)
+        self._checklist_scroll.setVisible(self._agent_running)
+        for w in self._footer_widgets:
+            w.setVisible(not self._agent_running)
+        if self._agent_running:
+            a = self._avail()
+            # At most 80% of the screen height, so there is always room beside
+            # it for the stop window and the target.
+            self.setFixedSize(RUN_PANEL_WIDTH, min(RUN_PANEL_HEIGHT, int(a.height() * 0.8)))
+            self._position_bottom_right()
+        else:
+            self._confirm_banner.setVisible(False)
+            self._agent_steps, self._agent_goals = [], []
+            self.setFixedSize(PANEL_WIDTH, PANEL_HEIGHT)
+            self._position_bottom_right()
+
+    def _avail(self):
+        from PyQt6.QtWidgets import QApplication
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    # mode switch
+    def _on_mode_clicked(self, do: bool):
+        self.on_agent_mode_changed.emit(do)
+
+    def set_agent_mode(self, do: bool):
+        """Mirror a change made elsewhere (tray) without re-emitting."""
+        btn = self._mode_buttons[bool(do)]
+        if not btn.isChecked():
+            btn.blockSignals(True)
+            btn.setChecked(True)
+            btn.blockSignals(False)
+
+    # checklist
+    def show_agent_steps(self, goal_idx: int, steps):
+        self._agent_goal_idx = goal_idx
+        self._agent_steps = list(steps or [])
+        self._agent_step_idx = 0
+        self._render_checklist()
+
+    def _render_checklist(self):
+        from ui.agent_view import checklist_html
+        goal = (self._agent_goals[self._agent_goal_idx].goal
+                if self._agent_goal_idx < len(self._agent_goals) else "")
+        self._checklist.setText(checklist_html(
+            self._agent_steps, self._agent_step_idx, goal,
+            self._agent_goal_idx, len(self._agent_goals) or 1))
+
+    # docking
+    def set_keep_clear_provider(self, provider):
+        self._keep_clear = provider
+
+    def dock_away_from(self, x: float, y: float):
+        """During a run: move to the corner opposite the target, never over
+        the target and never over the stop window."""
+        if not self._agent_running or not self.isVisible():
+            return
+        from ui.agent_view import panel_dock_position
+        a = self._avail()
+        keep = [(r.x(), r.y(), r.width(), r.height()) for r in self._keep_clear()]
+        g = self.frameGeometry()
+        nx, ny = panel_dock_position((a.x(), a.y(), a.width(), a.height()),
+                                     (g.width(), g.height()), (x, y), keep)
+        if (nx, ny) != (self.x(), self.y()):
+            self.move(nx, ny)
 
     def _update_ptt_label(self):
         self._ptt_btn.setText(strings_ka.AGENT_STOP_BUTTON if self._agent_running
@@ -579,10 +710,13 @@ class CompanionPanel(QWidget):
     # Qt queues those onto the GUI thread.
 
     def show_agent_prompt(self, kind: str, question: str):
-        """confirm -> დიახ / არა; private -> მზად ვარ; "" -> hide."""
+        """confirm -> red banner + დიახ / არა; private -> მზად ვარ; "" -> hide."""
         shown = {"confirm": ("yes", "no"), "private": ("ready",)}.get(kind, ())
         for value, btn in self._agent_buttons.items():
             btn.setVisible(value in shown)
+        if kind == "confirm":
+            self._confirm_banner.setText(f"{strings_ka.CONFIRM_BANNER_TITLE}\n{question}")
+        self._confirm_banner.setVisible(kind == "confirm")
         if shown and not self.isVisible():
             self.show()
 
@@ -595,18 +729,21 @@ class CompanionPanel(QWidget):
             self.show()
 
     def show_agent_plan(self, goals):
-        lines = []
-        for g in goals or []:
-            lines.append(g.goal)
-            lines += [f"   {s.id}. {s.title}" for s in g.steps]
-        if lines:
-            self.show_agent_say("გეგმა:\n" + "\n".join(lines))
+        self._agent_goals = list(goals or [])
+        if self._agent_goals:
+            self.show_agent_steps(0, self._agent_goals[0].steps)
 
     def show_agent_step(self, goal_idx: int, step_idx: int, title: str):
-        self._status_label.setText(f"ნაბიჯი {step_idx + 1}: {title}")
+        if goal_idx != self._agent_goal_idx and goal_idx < len(self._agent_goals):
+            self.show_agent_steps(goal_idx, self._agent_goals[goal_idx].steps)
+        self._agent_step_idx = step_idx
+        self._render_checklist()
 
     def set_agent_state(self, state: str, detail: str):
         label = AGENT_STATE_LABELS.get(state)
+        if self._agent_steps and state in ("acting", "verifying"):
+            from ui.agent_view import progress_text
+            label = progress_text(self._agent_step_idx, len(self._agent_steps))
         if label:
             self._status_label.setText(label)
         elif state in ("done", "cancelled", "idle"):

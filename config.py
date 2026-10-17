@@ -233,10 +233,11 @@ class Config:
     ))
 
     # Autopilot (agent/autopilot.py)
-    #   "guide" (default) — point and explain; the person does the clicking.
-    #   "do"              — carry out tasks itself; questions still get answers.
+    #   "do" (default) — carry out tasks itself; questions still get answers.
+    #   "guide"        — point and explain; the person does the clicking.
+    # Switched from the panel („მაჩვენე“ / „გააკეთე“) or the tray.
     agent_mode: str = field(default_factory=lambda: (
-        os.getenv("CLICKY_AGENT_MODE", "guide").strip().lower() or "guide"
+        os.getenv("CLICKY_AGENT_MODE", "do").strip().lower() or "do"
     ))
     # Animate and log every action but send no real input.
     agent_dry_run: bool = field(default_factory=lambda: (

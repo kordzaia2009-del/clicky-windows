@@ -233,6 +233,7 @@ class TrayManager(QObject):
         agent_action.setCheckable(True)
         agent_action.setChecked(self._agent_do)
         agent_action.triggered.connect(self._toggle_agent_mode)
+        self._agent_action = agent_action
         dry_action = tutor_menu.addAction("ავტოპილოტი: მხოლოდ ჩვენება (dry run)")
         dry_action.setCheckable(True)
         dry_action.setChecked(self._agent_dry)
@@ -576,6 +577,15 @@ class TrayManager(QObject):
     def _toggle_agent_mode(self, checked: bool):
         self._agent_do = checked
         self.on_toggle_agent_mode.emit(checked)
+
+    def set_agent_mode(self, do: bool):
+        """Mirror the panel's „მაჩვენე“ / „გააკეთე“ switch without re-emitting."""
+        self._agent_do = bool(do)
+        action = getattr(self, "_agent_action", None)
+        if action is not None and action.isChecked() != self._agent_do:
+            action.blockSignals(True)
+            action.setChecked(self._agent_do)
+            action.blockSignals(False)
 
     def _toggle_agent_dry_run(self, checked: bool):
         self._agent_dry = checked

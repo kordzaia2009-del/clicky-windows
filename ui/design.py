@@ -33,6 +33,9 @@ FONT_RESPONSE = font(13)
 # ── Geometry ──────────────────────────────────────────────────────────────────
 PANEL_WIDTH   = 380
 PANEL_HEIGHT  = 560
+# While the autopilot runs: room for the 24 px checklist (capped to the screen)
+RUN_PANEL_WIDTH  = 440
+RUN_PANEL_HEIGHT = 760
 PANEL_RADIUS  = 16
 CURSOR_RADIUS = 18
 

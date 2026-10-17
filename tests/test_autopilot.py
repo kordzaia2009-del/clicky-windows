@@ -293,3 +293,39 @@ def test_image_diff_on_real_jpegs():
     assert ap.image_diff(shot((0, 0, 0)), shot((255, 255, 255))) > 0.9
     other = shot((0, 0, 0)); other.physical_width = 99
     assert ap.image_diff(shot((0, 0, 0)), other) == 1.0
+
+
+# ── „დავიბენი“ (P2) ─────────────────────────────────────────────────────────
+
+def test_user_replan_from_the_current_screen_does_not_use_up_the_limit():
+    goal = Goal("ძებნა", steps("ა", "ბ", "გ"))
+    new = PlanResult(is_task=True, goals=[Goal("ძებნა", steps("ა2", "ბ2", "გ2"))])
+    env = Env([TASK(goal), new, new, new], [done()] * 30)
+    machine = env.machine(max_replans=0)          # automatic replans not allowed
+    seen_steps = []
+    machine.d.on_steps = lambda gi, s: seen_steps.append([x.title for x in s])
+    machine.request_replan()                       # pressed before step 1
+    out = asyncio.run(machine.handle("მოძებნე"))
+    assert out.state == ap.State.DONE
+    assert seen_steps[0] == ["ა", "ბ", "გ"] and seen_steps[1] == ["ა2", "ბ2", "გ2"]
+    assert "replanning" in env.states and ap.SAY_USER_REPLAN in env.said
+    # the replan looked at the screen as it is now
+    plan_i = [i for i, e in enumerate(env.events) if e == ("plan",)][1]
+    assert env.events[plan_i - 1] == ("capture",)
+
+
+def test_user_replan_between_attempts():
+    goal = Goal("ძებნა", steps("ა", "ბ", "გ"))
+    new = PlanResult(is_task=True, goals=[Goal("ძებნა", steps("x", "y", "z"))])
+    env = Env([TASK(goal), new], [act("click", "OK"), done(), done(), done()])
+    machine = env.machine()
+    orig = env.execute
+
+    def execute_then_lost(action, shot):
+        result = orig(action, shot)
+        machine.request_replan()                   # the person presses დავიბენი
+        return result
+    machine.d.execute = execute_then_lost
+    out = asyncio.run(machine.handle("მოძებნე"))
+    assert out.state == ap.State.DONE
+    assert [e for e in env.events if e == ("plan",)] == [("plan",)] * 2

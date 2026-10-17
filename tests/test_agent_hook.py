@@ -209,3 +209,26 @@ def test_cancel_while_planning_never_starts_the_run(mgr):
 def test_cancel_agent_is_a_no_op_when_idle(mgr):
     mgr.cancel_agent()
     assert not agent_executor.cancel_event.is_set()
+
+
+# ── P2: mode switch + „დავიბენი“ routing ─────────────────────────────────────
+
+def test_set_agent_mode_emits_for_panel_and_tray(mgr, monkeypatch):
+    monkeypatch.setattr(cfg, "_write_env", lambda k, v: None)
+    seen = []
+    mgr.sig_agent_mode.connect(seen.append, _Qt.ConnectionType.DirectConnection)
+    mgr.set_agent_mode(False)
+    assert cfg.agent_mode == "guide" and seen == [False]
+    mgr.set_agent_mode(True)
+    assert cfg.agent_mode == "do" and seen == [False, True]
+
+
+def test_spoken_lost_requests_a_replan(mgr):
+    asked = []
+    FakePilot.request_replan = lambda self: asked.append(1)
+    assert call(mgr, "გახსენი მეილი") is True
+    assert wait_until(lambda: mgr._agent is not None)
+    assert call(mgr, "დავიბენი") is True
+    assert asked == [1]
+    mgr.agent_request_replan()                    # the panel button
+    assert asked == [1, 1]

@@ -73,6 +73,7 @@ SAY_CANCELLED = "კარგი, გავჩერდი."
 SAY_DECLINED = "კარგი, ამას არ გავაკეთებ. შევჩერდი."
 SAY_GAVE_UP = "ვერ მოვახერხე ამ ნაბიჯის შესრულება. ბოდიში."
 SAY_REPLAN = "სხვა გზას ვცდი."
+SAY_USER_REPLAN = "კარგი, თავიდან შევხედავ ეკრანს."
 ASK_CONFIRM = "ეს მნიშვნელოვანი მოქმედებაა: {what}. გავაგრძელო? თქვით „დიახ“ ან „არა“."
 
 ACTION_TYPES = ("click", "double_click", "type", "key", "scroll", "wait")
@@ -223,6 +224,8 @@ class AutopilotDeps:
     on_state: Callable[[str, str], None] = lambda s, d: None
     on_plan: Callable[[list], None] = lambda goals: None
     on_step: Callable[[int, int, Step], None] = lambda gi, si, s: None
+    # the current goal's steps — at its start and after every replan
+    on_steps: Callable[[int, List[Step]], None] = lambda gi, steps: None
     image_diff: Callable[[Any, Any], float] = image_diff
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     run_blocking: Optional[Callable] = None     # default: asyncio.to_thread
@@ -269,6 +272,7 @@ class Autopilot:
         self.transitions: List[str] = []
         self.request = ""
         self._actions = 0
+        self._replan_requested = threading.Event()   # „დავიბენი“
 
     # state + helpers
     def _set(self, state: State, detail: str = ""):
@@ -300,6 +304,17 @@ class Autopilot:
                 self.d.say(text)
             except Exception:
                 log.debug("say failed", exc_info=True)
+
+    def request_replan(self):
+        """„დავიბენი“: the person is lost — look at the screen again and plan
+        the rest of the current goal from there. Thread-safe."""
+        self._replan_requested.set()
+
+    def _take_replan_request(self) -> bool:
+        if self._replan_requested.is_set():
+            self._replan_requested.clear()
+            return True
+        return False
 
     # entry points
     async def plan_request(self, user_text: str) -> PlanResult:
@@ -350,10 +365,16 @@ class Autopilot:
         self._actions = 0
         replans = 0
         i = 0
+        self.d.on_steps(gi, steps)
         while i < len(steps):
             self._check_cancel()
             step = steps[i]
             self.d.on_step(gi, i, step)
+            if self._take_replan_request():
+                self._say(SAY_USER_REPLAN)
+                steps = await self._replan(goal, steps, i, by_user=True)
+                self.d.on_steps(gi, steps)
+                continue
             if step.private:
                 await self._private_pause()
                 history.append(f"step {i + 1}: done by the person (private)")
@@ -363,17 +384,25 @@ class Autopilot:
             if result == "done":
                 i += 1
                 continue
+            if result == "user_replan":
+                self._say(SAY_USER_REPLAN)
+                steps = await self._replan(goal, steps, i, by_user=True)
+                self.d.on_steps(gi, steps)
+                continue
             # "replan": 3 failed attempts or the model is stuck
             if replans >= self.s.max_replans:
                 raise _Stop(State.DONE, SAY_GAVE_UP)
             replans += 1
             steps = await self._replan(goal, steps, i)    # same i, new steps
+            self.d.on_steps(gi, steps)
 
     async def _run_step(self, gi, goal, steps, i, history) -> str:
         """Try one step until it is done ("done") or needs a new plan ("replan")."""
         failures = 0
         while True:
             self._check_cancel()
+            if self._take_replan_request():
+                return "user_replan"
             if self._actions >= self.s.max_actions_per_goal:
                 raise _Stop(State.DONE, SAY_GAVE_UP)
             self._set(State.ACTING, f"goal {gi + 1} step {i + 1}")
@@ -531,13 +560,18 @@ class Autopilot:
                 break
         return self.d.image_diff(before, prev) > self.s.change_eps
 
-    async def _replan(self, goal: Goal, steps: List[Step], i: int) -> List[Step]:
-        self._set(State.REPLANNING, f"step {i + 1}: {steps[i].title}")
-        self._say(SAY_REPLAN)
+    async def _replan(self, goal: Goal, steps: List[Step], i: int,
+                      by_user: bool = False) -> List[Step]:
+        self._set(State.REPLANNING, ("asked by the person — " if by_user else "")
+                  + f"step {i + 1}: {steps[i].title}")
+        if not by_user:
+            self._say(SAY_REPLAN)
         shot = await self._screen()
         done = "; ".join(s.title for s in steps[:i]) or "nothing yet"
+        why = ("The person says they are lost at the step" if by_user
+               else "This step did not work:")
         text = (f"{self.request}\n\nCurrent goal: {goal.goal}. Already done: {done}. "
-                f"The step '{steps[i].title}' did not work. Plan ONLY the remaining "
+                f"{why} '{steps[i].title}'. Plan ONLY the remaining "
                 f"steps of this goal, starting from what is on the screen now.")
         result = await self.d.plan(text, shot)
         if not result.is_task or not result.goals:

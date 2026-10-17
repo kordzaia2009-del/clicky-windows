@@ -246,6 +246,8 @@ class CompanionManager(QObject):
     sig_agent_confirm_request = pyqtSignal(str, str)      # kind: confirm|private|"" (hide), question
     sig_agent_state         = pyqtSignal(str, str)        # state, detail
     sig_agent_running       = pyqtSignal(bool)            # a run started / ended
+    sig_agent_mode          = pyqtSignal(bool)            # True = "do" (keeps panel + tray in sync)
+    sig_agent_steps         = pyqtSignal(int, object)     # goal index, list[Step] (start / replan)
     sig_agent_target        = pyqtSignal(float, float)    # logical px the next action aims at
     sig_copilot_models_done = pyqtSignal(int)             # arg = model count
     sig_models_refreshed    = pyqtSignal(str, int)        # (provider, count)
@@ -1204,6 +1206,9 @@ class CompanionManager(QObject):
             if is_stop(transcript):
                 agent_executor.cancel_event.set()
                 return True
+            if "დავიბენი" in transcript or "დავიბნიე" in transcript:
+                self.agent_request_replan()
+                return True
             if self._agent_wait is not None:
                 kind = self._agent_wait[0]
                 reply = interpret_reply(transcript, kind)
@@ -1318,6 +1323,7 @@ class CompanionManager(QObject):
             on_state=lambda s, d: self.sig_agent_state.emit(s, d),
             on_plan=lambda goals: self.sig_agent_plan.emit(goals),
             on_step=lambda gi, si, step: self.sig_agent_step.emit(gi, si, step.title),
+            on_steps=lambda gi, steps: self.sig_agent_steps.emit(gi, list(steps)),
         )
 
     def _agent_locate(self, label: str, shot):
@@ -1420,8 +1426,16 @@ class CompanionManager(QObject):
         self._loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(value))
 
     def set_agent_mode(self, do_tasks: bool):
+        """From the panel switch or the tray; applies to the next request."""
         cfg.agent_mode = "do" if do_tasks else "guide"
         cfg._write_env("CLICKY_AGENT_MODE", cfg.agent_mode)
+        self.sig_agent_mode.emit(bool(do_tasks))
+
+    def agent_request_replan(self):
+        """„დავიბენი“ (button or speech): replan from the current screen."""
+        pilot = self._agent
+        if pilot is not None:
+            pilot.request_replan()
 
     def set_agent_dry_run(self, enabled: bool):
         cfg.agent_dry_run = bool(enabled)

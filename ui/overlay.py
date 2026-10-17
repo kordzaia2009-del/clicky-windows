@@ -165,6 +165,8 @@ CAPTION_FADE_IN_S = 0.25
 CAPTION_FADE_OUT_S = 0.6
 CAPTION_LINGER_S  = 5.0     # stays this long after the answer finishes
 CAPTION_BG_ALPHA  = 128     # 0-255; half see-through so the screen shows behind it
+AGENT_CAPTION_MIN_S = 4.0   # autopilot lines: shown at least this long...
+AGENT_CAPTION_CHARS_PER_S = 12.0   # ...plus reading time for elderly users
 
 # Teacher-pace pointing timings (seconds)
 # Flight duration scales with distance but stays slow enough to follow visually.
@@ -237,6 +239,7 @@ class CursorOverlay(QWidget):
         self._caption_t0: float = 0.0
         self._caption_hide_at: float = float("inf")
         self._caption_area = None   # QRect of the screen the user is on
+        self._caption_header: str = CAPTION_HEADER
 
         # Transparent click-through, covers all monitors
         self.setWindowFlags(
@@ -283,16 +286,29 @@ class CursorOverlay(QWidget):
                 self._caption_hide_at, time.monotonic() + CAPTION_LINGER_S
             )
 
-    def show_caption(self, text: str):
-        """Show the recognised question in large type until the answer ends."""
+    def show_caption(self, text: str, header: str = CAPTION_HEADER,
+                     hold_s: Optional[float] = None):
+        """Show text in large type at the bottom of the screen. Without
+        hold_s it stays until the answer ends (the user's own question);
+        with hold_s it fades out after that many seconds."""
         text = " ".join(text.split())
         if len(text) > CAPTION_MAX_CHARS:
             text = text[:CAPTION_MAX_CHARS].rstrip() + "…"
         self._caption_text = text
+        self._caption_header = header
         self._caption_t0 = time.monotonic()
-        self._caption_hide_at = float("inf")
+        self._caption_hide_at = (float("inf") if hold_s is None
+                                 else self._caption_t0 + hold_s)
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         self._caption_area = screen.availableGeometry()
+
+    def show_agent_caption(self, text: str):
+        """What the autopilot says, as the same large caption. During a run
+        the app stays idle, so it times out by length instead of waiting for
+        the end of an answer."""
+        from ui.strings_ka import AGENT_CAPTION_HEADER
+        self.show_caption(text, AGENT_CAPTION_HEADER,
+                          hold_s=AGENT_CAPTION_MIN_S + len(text) / AGENT_CAPTION_CHARS_PER_S)
 
     def set_audio_level(self, rms: float):
         # Match Swift easing: eased = pow(min(rms*2.85, 1), 0.76)
@@ -713,7 +729,7 @@ class CursorOverlay(QWidget):
         p.setFont(head_font)
         head_h = p.fontMetrics().height()
 
-        box_w = max(body.width(), p.fontMetrics().horizontalAdvance(CAPTION_HEADER)) + 2 * pad
+        box_w = max(body.width(), p.fontMetrics().horizontalAdvance(self._caption_header)) + 2 * pad
         box_h = head_h + 6 + body.height() + 2 * pad
         # Bottom-centre of the screen the user is on, above the taskbar.
         # The overlay spans every monitor, so convert to window-local coords.
@@ -736,9 +752,9 @@ class CursorOverlay(QWidget):
         shadow = QColor(0, 0, 0, int(200 * alpha))
         p.setFont(head_font)
         p.setPen(shadow)
-        p.drawText(head_rect.translated(1.5, 1.5), int(Qt.AlignmentFlag.AlignHCenter), CAPTION_HEADER)
+        p.drawText(head_rect.translated(1.5, 1.5), int(Qt.AlignmentFlag.AlignHCenter), self._caption_header)
         p.setPen(QColor(190, 210, 245, int(255 * alpha)))
-        p.drawText(head_rect, int(Qt.AlignmentFlag.AlignHCenter), CAPTION_HEADER)
+        p.drawText(head_rect, int(Qt.AlignmentFlag.AlignHCenter), self._caption_header)
         p.setFont(body_font)
         p.setPen(shadow)
         p.drawText(body_rect.translated(2, 2), flags, self._caption_text)
