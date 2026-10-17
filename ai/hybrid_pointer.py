@@ -33,8 +33,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Optional, List, Tuple
 
 log = logging.getLogger("clicky.pointer")
 
@@ -48,6 +48,9 @@ class Target:
     label: str            # what we matched (button text, control type, etc.)
     source: str           # "uia" | "ocr" | "vision"
     confidence: float     # 0.0–1.0
+    # The UIA control itself when source == "uia" (agent/executor.py uses it
+    # for Invoke/Select). Coordinates above are PHYSICAL pixels for uia/ocr.
+    element: Any = field(default=None, repr=False, compare=False)
 
     @property
     def center_xy(self) -> Tuple[int, int]:
@@ -172,6 +175,7 @@ def _find_via_uia(query: str, min_score: float = 0.5) -> Optional[Target]:
         label=node.Name or node.ControlTypeName,
         source="uia",
         confidence=score,
+        element=node,
     )
 
 

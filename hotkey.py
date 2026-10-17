@@ -1,6 +1,6 @@
 import threading
 import time
-from typing import Callable
+from typing import Callable, Optional
 
 import keyboard
 
@@ -165,11 +165,24 @@ class StopHotkey:
     Only fires while Clicky is actively talking/thinking — the callback itself
     should no-op when Clicky is idle, so this can be left always-on without
     stealing Esc from other apps' UX.
+
+    `cancel_event`, when given, is also set on every press — the executor
+    (agent/executor.py) checks it before and during each real input action,
+    so Esc stops automation even between actions. It is a latch: whoever
+    starts a new task clears it.
     """
 
-    def __init__(self, on_stop: Callable[[], None], key: str = "esc"):
+    def __init__(self, on_stop: Callable[[], None], key: str = "esc",
+                 cancel_event: Optional[threading.Event] = None):
         self._on_stop = on_stop
         self._key = key
+        self._cancel_event = cancel_event
+
+    def _fire(self):
+        # Set the event first: it must not depend on on_stop succeeding.
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        self._on_stop()
 
     def start(self):
-        keyboard.add_hotkey(self._key, self._on_stop, suppress=False)
+        keyboard.add_hotkey(self._key, self._fire, suppress=False)

@@ -438,8 +438,11 @@ def main():
     )
     hotkey.start()
 
-    # Esc = cancel current generation (kills Ollama ramble mid-stream)
-    stop_key = StopHotkey(on_stop=manager.stop, key="esc")
+    # Esc = cancel current generation (kills Ollama ramble mid-stream), and
+    # latch the executor's cancel_event so any real input action stops too.
+    from agent.executor import cancel_event as executor_cancel_event
+    stop_key = StopHotkey(on_stop=manager.stop, key="esc",
+                          cancel_event=executor_cancel_event)
     stop_key.start()
 
     # ── Show UI + start listener ──────────────────────────────────────────────
