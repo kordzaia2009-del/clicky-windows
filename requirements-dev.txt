@@ -1,0 +1,4 @@
+# Development / test only — not needed to run Clicky.
+#   pip install -r requirements-dev.txt
+#   python -m pytest tests/
+pytest==8.3.5
