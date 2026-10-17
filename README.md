@@ -387,6 +387,39 @@ Right-click the tray icon → full menu including:
 
 ---
 
+## Autopilot (კლიპიტაური does the task)
+
+In **„გააკეთე“** mode the assistant carries out a request itself (open the browser, go to a site, search…), one step at a time, showing each step on screen. Questions are still answered normally, and **„მაჩვენე“** mode keeps the classic point-and-explain behaviour.
+
+### Run the demo
+
+1. Start the app from the project folder:
+   ```bash
+   venv\Scripts\python.exe main.py
+   ```
+2. Pick the mode at the top of the panel: **გააკეთე** (do it for me, the default) or **მაჩვენე** (just show me). The same switch is in the tray: right-click → **სწავლების რეჟიმი** → **ავტოპილოტი — თავად შეასრულოს დავალება**.
+3. **Try it safely first with dry run:** right-click the tray icon → **სწავლების რეჟიმი** → tick **ავტოპილოტი: მხოლოდ ჩვენება (dry run)**. The pointer still flies to every target and every step is logged, but nothing is clicked or typed. Untick it for real input.
+4. **Give it a task:** type it in the panel's box (*„ან აქ დაწერეთ კითხვა…“*) and press Enter, e.g. `გახსენი ბრაუზერი`, or say it after `Ctrl + Win` / the wake word.
+5. Follow along: the panel shows the plan as a large checklist (*„ნაბიჯი 2 / 4“*), and what the assistant says appears as a big caption. Press **დავიბენი** if it seems lost; it looks at the screen again and plans the rest from there.
+
+| Setting (`.env`) | Values | Default |
+|---|---|---|
+| `CLICKY_AGENT_MODE` | `do` / `guide` | `do` |
+| `CLICKY_AGENT_DRY_RUN` | `1` = no real input | off |
+| `CLICKY_CONFIRM_KEYWORDS` | comma-separated words that need a „დიახ“ | გაგზავნა, წაშლა, გადახდა, დადასტურება, შეკვეთა, Send, Delete, Pay, Confirm, Submit, Buy, Remove |
+
+The tray and panel switches take effect on the next request; `.env` changes need a restart. Every step is logged to `%LOCALAPPDATA%\Clicky\clicky.log` (`autopilot:` lines for states, `clicky.executor` for actions).
+
+### Safety guarantees
+
+- **Never types passwords, card data or codes.** Steps marked private and fields detected as password/card/code are left to the person ("აკრიფე შენი მონაცემები, მე არ ვუყურებ"), and it waits for **მზად ვარ**. The executor also refuses to type into any field Windows reports as a password field.
+- **Never looks at private steps.** During a private step no screenshot is taken and nothing is sent to the AI; typed text is never written to the logs (only its length).
+- **Asks before irreversible actions.** Sending, deleting, paying, buying, ordering, submitting or confirming shows a red banner and waits for **დიახ**; anything else, or silence, means no.
+- **Stops at any time:** press **Esc**, click the red **გაჩერება** stop window (always on top, never steals focus), click **■ გაჩერება** in the panel, or say **„გაჩერდი“**. Stopping cancels the whole queue of goals.
+- **Stays in its lane:** at most 15 actions per goal, and a click is refused if one of the assistant's own windows covers the target.
+
+---
+
 ## Architecture
 
 ```
