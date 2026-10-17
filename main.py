@@ -227,6 +227,16 @@ def main():
     tray.on_toggle_multilang.connect(manager.set_multilang)
     tray.on_toggle_journal.connect(manager.set_journal)
     tray.on_toggle_ocr.connect(manager.set_ocr_enabled)
+    tray.on_toggle_agent_mode.connect(manager.set_agent_mode)
+    tray.on_toggle_agent_dry_run.connect(manager.set_agent_dry_run)
+
+    # Autopilot progress -> panel; panel answers -> autopilot
+    manager.sig_agent_plan.connect(panel.show_agent_plan)
+    manager.sig_agent_step.connect(panel.show_agent_step)
+    manager.sig_agent_say.connect(panel.show_agent_say)
+    manager.sig_agent_confirm_request.connect(panel.show_agent_prompt)
+    manager.sig_agent_state.connect(panel.set_agent_state)
+    panel.on_agent_reply.connect(manager.agent_reply)
 
     # Lesson recording
     def _record_start():

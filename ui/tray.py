@@ -44,6 +44,8 @@ class TrayManager(QObject):
     on_toggle_multilang   = pyqtSignal(bool)
     on_toggle_journal     = pyqtSignal(bool)
     on_toggle_ocr         = pyqtSignal(bool)
+    on_toggle_agent_mode  = pyqtSignal(bool)    # True = "do" (autopilot)
+    on_toggle_agent_dry_run = pyqtSignal(bool)
     on_record_start       = pyqtSignal()
     on_record_stop        = pyqtSignal()
     on_collab_start       = pyqtSignal()
@@ -93,6 +95,8 @@ class TrayManager(QObject):
         self._multilang_enabled = True
         self._journal_enabled = True
         self._ocr_enabled = True
+        self._agent_do = cfg.agent_mode == "do"
+        self._agent_dry = cfg.agent_dry_run
         self._is_recording = False
 
         # Ollama model state — populated by manager via set_ollama_models()
@@ -223,6 +227,16 @@ class TrayManager(QObject):
         ocr_action.setChecked(self._ocr_enabled)
         ocr_action.triggered.connect(self._toggle_ocr)
         self._ocr_action = ocr_action
+
+        tutor_menu.addSeparator()
+        agent_action = tutor_menu.addAction("ავტოპილოტი — თავად შეასრულოს დავალება")
+        agent_action.setCheckable(True)
+        agent_action.setChecked(self._agent_do)
+        agent_action.triggered.connect(self._toggle_agent_mode)
+        dry_action = tutor_menu.addAction("ავტოპილოტი: მხოლოდ ჩვენება (dry run)")
+        dry_action.setCheckable(True)
+        dry_action.setChecked(self._agent_dry)
+        dry_action.triggered.connect(self._toggle_agent_dry_run)
 
         # ── Journal ──
         menu.addSeparator()
@@ -558,6 +572,14 @@ class TrayManager(QObject):
             "მრავალენოვანი: ჩართულია" if checked else "მრავალენოვანი: გამორთულია"
         )
         self.on_toggle_multilang.emit(checked)
+
+    def _toggle_agent_mode(self, checked: bool):
+        self._agent_do = checked
+        self.on_toggle_agent_mode.emit(checked)
+
+    def _toggle_agent_dry_run(self, checked: bool):
+        self._agent_dry = checked
+        self.on_toggle_agent_dry_run.emit(checked)
 
     def _toggle_ocr(self, checked: bool):
         self._ocr_enabled = checked

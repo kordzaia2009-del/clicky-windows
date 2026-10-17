@@ -82,6 +82,15 @@ BUTTON_LABELS = {
     AppState.SPEAKING:  "■  გაჩერება",
 }
 
+AGENT_STATE_LABELS = {
+    "planning": "ვგეგმავ…",
+    "acting": "ვასრულებ…",
+    "verifying": "ვამოწმებ…",
+    "replanning": "სხვა გზას ვეძებ…",
+    "awaiting_confirm": "გელოდებით: დიახ ან არა",
+    "awaiting_private": "გელოდებით: მზად ვარ",
+}
+
 STATE_COLORS = {
     AppState.IDLE:      STATE_IDLE,
     AppState.LISTENING: STATE_LISTENING,
@@ -189,6 +198,7 @@ class CompanionPanel(QWidget):
     on_ask_clicked           = pyqtSignal()        # big button
     on_text_submitted        = pyqtSignal(str)     # typed question
     on_shown                 = pyqtSignal()        # lets the pointer re-raise above us
+    on_agent_reply           = pyqtSignal(str)     # "yes" | "no" | "ready"
     _sig_question            = pyqtSignal(str)
     _sig_error               = pyqtSignal(str)
     on_model_changed         = pyqtSignal(str)
@@ -318,6 +328,25 @@ class CompanionPanel(QWidget):
         self._response_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         scroll.setWidget(self._response_label)
         root.addWidget(scroll, stretch=1)
+
+        # Autopilot answers — shown only while it waits for the person
+        agent_row = QHBoxLayout()
+        self._agent_buttons = {}
+        for value, text, color in (("yes", "დიახ", "rgb(30,150,80)"),
+                                    ("no", "არა", "rgb(170,60,60)"),
+                                    ("ready", "მზად ვარ", "rgb(0,110,235)")):
+            btn = QPushButton(text)
+            btn.setFixedHeight(40)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {color}; color: white; border: none;"
+                "border-radius: 8px; font-size: 15px; font-weight: 600; }}"
+            )
+            btn.clicked.connect(lambda _=False, v=value: self.on_agent_reply.emit(v))
+            btn.setVisible(False)
+            agent_row.addWidget(btn)
+            self._agent_buttons[value] = btn
+        root.addLayout(agent_row)
 
         # Typed question — works even when speech recognition can't
         type_row = QHBoxLayout()
@@ -532,6 +561,44 @@ class CompanionPanel(QWidget):
         self._response_label.setText(self._response_text)
         if not self.isVisible():
             self.show()
+
+    # ── Autopilot ─────────────────────────────────────────────────────────────
+    # Connected to CompanionManager signals emitted from its worker thread;
+    # Qt queues those onto the GUI thread.
+
+    def show_agent_prompt(self, kind: str, question: str):
+        """confirm -> დიახ / არა; private -> მზად ვარ; "" -> hide."""
+        shown = {"confirm": ("yes", "no"), "private": ("ready",)}.get(kind, ())
+        for value, btn in self._agent_buttons.items():
+            btn.setVisible(value in shown)
+        if shown and not self.isVisible():
+            self.show()
+
+    def show_agent_say(self, text: str):
+        if self._response_text:
+            self._response_text += "\n"
+        self._response_text += f"• {text}"
+        self._response_label.setText(self._response_text)
+        if not self.isVisible():
+            self.show()
+
+    def show_agent_plan(self, goals):
+        lines = []
+        for g in goals or []:
+            lines.append(g.goal)
+            lines += [f"   {s.id}. {s.title}" for s in g.steps]
+        if lines:
+            self.show_agent_say("გეგმა:\n" + "\n".join(lines))
+
+    def show_agent_step(self, goal_idx: int, step_idx: int, title: str):
+        self._status_label.setText(f"ნაბიჯი {step_idx + 1}: {title}")
+
+    def set_agent_state(self, state: str, detail: str):
+        label = AGENT_STATE_LABELS.get(state)
+        if label:
+            self._status_label.setText(label)
+        elif state in ("done", "cancelled", "idle"):
+            self._status_label.setText(STATE_LABELS[self._state])
 
     def set_audio_level(self, rms: float):
         self._waveform.set_level(rms)

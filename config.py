@@ -22,6 +22,8 @@ for _name in (".env", ".env.local"):
         load_dotenv(_p, override=True)
 
 
+from agent.safety import DEFAULT_CONFIRM_KEYWORDS as _DEFAULT_CONFIRM_KEYWORDS
+
 DEFAULT_SYSTEM_PROMPT = """You are Klipitauri (in Georgian: კლიპიტაური), a patient helper on a Windows
 computer. The people you help are elderly Georgian speakers, often new to
 computers. You can see their screen and point at things on it.
@@ -229,6 +231,23 @@ class Config:
     tap_max_seconds: float = field(default_factory=lambda: float(
         os.getenv("CLICKY_TAP_MAX_SECONDS", "0.6") or 0.6
     ))
+
+    # Autopilot (agent/autopilot.py)
+    #   "guide" (default) — point and explain; the person does the clicking.
+    #   "do"              — carry out tasks itself; questions still get answers.
+    agent_mode: str = field(default_factory=lambda: (
+        os.getenv("CLICKY_AGENT_MODE", "guide").strip().lower() or "guide"
+    ))
+    # Animate and log every action but send no real input.
+    agent_dry_run: bool = field(default_factory=lambda: (
+        os.getenv("CLICKY_AGENT_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+    ))
+    # Targets / typed text matching these need a spoken „დიახ“ first.
+    confirm_keywords: list = field(default_factory=lambda: [
+        k.strip() for k in os.getenv(
+            "CLICKY_CONFIRM_KEYWORDS", ",".join(_DEFAULT_CONFIRM_KEYWORDS)
+        ).split(",") if k.strip()
+    ])
 
     def ambient_mic(self) -> bool:
         """True when the mic should stay open and scan for the wake word."""

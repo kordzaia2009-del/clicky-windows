@@ -239,6 +239,12 @@ class CompanionManager(QObject):
     sig_point_retarget      = pyqtSignal(float, float)    # nudge to a refined spot
     sig_error               = pyqtSignal(str)
     sig_transcript          = pyqtSignal(str)             # recognised speech, before answering
+    # Autopilot progress ("do" mode)
+    sig_agent_plan          = pyqtSignal(object)          # list[agent.planner.Goal]
+    sig_agent_step          = pyqtSignal(int, int, str)   # goal index, step index, step title
+    sig_agent_say           = pyqtSignal(str)             # what the autopilot says
+    sig_agent_confirm_request = pyqtSignal(str, str)      # kind: confirm|private|"" (hide), question
+    sig_agent_state         = pyqtSignal(str, str)        # state, detail
     sig_copilot_models_done = pyqtSignal(int)             # arg = model count
     sig_models_refreshed    = pyqtSignal(str, int)        # (provider, count)
     sig_ollama_models       = pyqtSignal(dict)            # {"vision": [...], "text": [...]}
@@ -304,6 +310,12 @@ class CompanionManager(QObject):
         # normalized 0-1000 tag coordinates back to logical screen pixels.
         self._screens_ctx: list = []
         self._point_token = 0    # bumps per pointing gesture; stale refinements are dropped
+        # Autopilot: one run at a time; while it waits for „დიახ“/„მზად ვარ“
+        # the reply is routed to it instead of being treated as a question.
+        self._agent_lock = threading.Lock()
+        self._agent = None
+        self._agent_wait = None          # (kind, asyncio.Future)
+        self._agent_speech = None        # tail of the queued autopilot speech
         # Figures detected on screen this turn (normalized vertices) — used
         # for prompt injection and for snapping sloppy stroke endpoints.
         self._figures_ctx: list = []
@@ -739,6 +751,10 @@ class CompanionManager(QObject):
             # voice commands, so a misheard one is visible too.
             self.sig_transcript.emit(transcript.strip())
 
+            # ── Autopilot: "do" mode tasks, and replies while one runs ──
+            if await self._agent_intercept(transcript):
+                return
+
             # ── Voice commands — short-circuit before LLM ──
             if is_stop(transcript):
                 self.stop()
@@ -1163,6 +1179,212 @@ class CompanionManager(QObject):
         except Exception:
             pass
         self._emit_state(AppState.IDLE)
+
+    # ── Autopilot ("do" mode) ─────────────────────────────────────────────────
+
+    async def _agent_intercept(self, transcript: str) -> bool:
+        """True when the autopilot took this transcript (the normal Q&A
+        must not run). Called from _answer() right after the transcript is
+        shown; never touches the streaming [POINT]/[UNDERLINE] path."""
+        from agent import executor as agent_executor
+        from agent.autopilot import Autopilot, Settings, interpret_reply
+
+        if self._agent is not None:                       # a run is going on
+            if is_stop(transcript):
+                agent_executor.cancel_event.set()
+                return True
+            if self._agent_wait is not None:
+                kind = self._agent_wait[0]
+                reply = interpret_reply(transcript, kind)
+                if reply is None:
+                    self._agent_say("როცა მორჩებით, თქვით: მზად ვარ.")
+                else:
+                    self.agent_reply(reply)
+                return True
+            await self._reply_local(
+                "ერთი წუთით — ჯერ წინა დავალებას ვასრულებ. გასაჩერებლად თქვით: გაჩერდი."
+            )
+            return True
+
+        if cfg.agent_mode != "do":
+            return False
+        # Short voice commands keep their old local handling.
+        if is_stop(transcript) or is_next(transcript) or is_repeat(transcript) \
+                or is_journal_today(transcript) or is_journal_week(transcript):
+            return False
+        if not self._agent_lock.acquire(blocking=False):  # single flight
+            await self._reply_local("ერთი წუთით — ჯერ წინა დავალებას ვასრულებ.")
+            return True
+        try:
+            pilot = Autopilot(
+                self._agent_deps(), agent_executor.cancel_event,
+                Settings(dry_run=cfg.agent_dry_run,
+                         confirm_keywords=tuple(cfg.confirm_keywords)),
+            )
+            plan = await pilot.plan_request(transcript)
+        except Exception:
+            _log.exception("autopilot planning failed")
+            self._agent_lock.release()
+            return False
+        if not plan.is_task:
+            self._agent_lock.release()
+            return False                                  # old flow answers it
+        self._agent = pilot
+        asyncio.ensure_future(self._agent_run(pilot, plan))
+        return True
+
+    async def _agent_run(self, pilot, plan):
+        try:
+            await pilot.run_plan(plan)
+        finally:
+            self._agent = None
+            self._agent_wait = None
+            self.sig_agent_confirm_request.emit("", "")
+            self._agent_lock.release()
+
+    def _agent_deps(self):
+        from agent import executor as agent_executor
+        from agent.autopilot import AutopilotDeps
+        from agent.planner import plan as planner_plan
+
+        callbacks = agent_executor.ExecutorCallbacks(
+            point_at=self.sig_point_at.emit,
+            point_hold=self.sig_point_hold.emit,
+            point_release=self.sig_point_release.emit,
+            flight_scale=1.7 if self._slow_mode else 1.0,
+        )
+
+        async def plan(text, shot):
+            return await planner_plan(text, shot, llm=self._get_llm(), model=self._current_model)
+
+        async def decide(system, user, image):
+            parts = []
+            async for chunk in self._get_llm().stream_response(
+                user_text=user, screenshots_b64=[image] if image else [],
+                history=[], system_prompt=system, model=self._current_model,
+            ):
+                parts.append(chunk)
+            return "".join(parts)
+
+        def execute(action, shot):
+            agent_executor.set_dry_run(cfg.agent_dry_run)
+            return agent_executor.execute(action, shot, callbacks)
+
+        return AutopilotDeps(
+            plan=plan, decide=decide, capture=capture_all_screens,
+            locate=self._agent_locate, execute=execute,
+            say=self._agent_say, ask=self._agent_ask,
+            on_state=lambda s, d: self.sig_agent_state.emit(s, d),
+            on_plan=lambda goals: self.sig_agent_plan.emit(goals),
+            on_step=lambda gi, si, step: self.sig_agent_step.emit(gi, si, step.title),
+        )
+
+    def _agent_locate(self, label: str, shot):
+        """The existing locator chain for one label: UIA -> OCR (hybrid
+        pointer) -> Computer Use -> grid locator. Runs on a worker thread.
+        Returns physical pixels."""
+        from agent.autopilot import Located
+        from ai.hybrid_pointer import find_target
+        try:
+            t = find_target(label, screenshot=shot, skip_vision=True)
+        except Exception:
+            t = None
+        if t is not None and t.source in ("uia", "ocr"):
+            is_pw = False
+            if t.element is not None:
+                try:
+                    is_pw = bool(t.element.IsPassword)
+                except Exception:
+                    pass
+            return Located(int(t.x), int(t.y), t.label or label, t.element, t.source, is_pw)
+        if shot is None or self._loop is None:
+            return None
+        kwargs = dict(
+            screenshot_jpeg_b64=shot.base64_jpeg, original_width=shot.width,
+            original_height=shot.height, physical_width=shot.physical_width,
+            physical_height=shot.physical_height, physical_left=shot.physical_left,
+            physical_top=shot.physical_top, dpi_scale=shot.dpi_scale,
+            screen_index=shot.index, user_question=f"Where is: {label}",
+        )
+        found = None
+        try:
+            if _computer_use_available():
+                from ai.element_locator import detect_element
+                found = asyncio.run_coroutine_threadsafe(
+                    detect_element(**kwargs), self._loop).result(timeout=40)
+            if found is None:
+                from ai.universal_locator import detect_element_universal
+                found = asyncio.run_coroutine_threadsafe(
+                    detect_element_universal(llm=self._get_llm(), model=self._current_model,
+                                             **kwargs), self._loop).result(timeout=60)
+        except Exception:
+            _log.exception("vision locator failed for %r", label)
+            found = None
+        if found is None:
+            return None
+        s = shot.dpi_scale or 1.0       # Detected is logical; the executor wants physical
+        return Located(int(round((found.x - shot.logical_left) * s + shot.physical_left)),
+                       int(round((found.y - shot.logical_top) * s + shot.physical_top)),
+                       label, None, "vision", False)
+
+    def _agent_say(self, text: str):
+        """Show + speak without blocking the autopilot; lines are queued so
+        they never talk over each other."""
+        if not text:
+            return
+        self.sig_agent_say.emit(text)
+        prev = self._agent_speech
+
+        async def _speak():
+            if prev is not None:
+                try:
+                    await prev
+                except Exception:
+                    pass
+            try:
+                await self._get_tts().speak(_speakable(text))
+            except Exception:
+                pass
+
+        self._agent_speech = asyncio.ensure_future(_speak())
+
+    async def _agent_ask(self, kind: str, question: str):
+        """Wait for „დიახ“/„არა“ (confirm) or „მზად ვარ“ (private): spoken
+        (routed by _agent_intercept) or from the panel buttons. None on
+        cancel or timeout."""
+        from agent.executor import cancel_event
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._agent_wait = (kind, fut)
+        if kind == "confirm":
+            self._agent_say(question)
+        self.sig_agent_confirm_request.emit(kind, question)
+        deadline = time.monotonic() + (600 if kind == "private" else 120)
+        try:
+            while not fut.done():
+                if cancel_event.is_set() or time.monotonic() > deadline:
+                    return None
+                await asyncio.sleep(0.1)
+            return fut.result()
+        finally:
+            self._agent_wait = None
+            self.sig_agent_confirm_request.emit("", "")
+
+    def agent_reply(self, value: str):
+        """Thread-safe: "yes" / "no" / "ready" from the panel or speech."""
+        wait = self._agent_wait
+        if not wait or self._loop is None:
+            return
+        fut = wait[1]
+        self._loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(value))
+
+    def set_agent_mode(self, do_tasks: bool):
+        cfg.agent_mode = "do" if do_tasks else "guide"
+        cfg._write_env("CLICKY_AGENT_MODE", cfg.agent_mode)
+
+    def set_agent_dry_run(self, enabled: bool):
+        cfg.agent_dry_run = bool(enabled)
+        cfg._write_env("CLICKY_AGENT_DRY_RUN", "1" if enabled else "")
 
     # ── Coordinate mapping ────────────────────────────────────────────────────
     #
@@ -1818,6 +2040,9 @@ class CompanionManager(QObject):
     def stop(self):
         """Cancel the current LLM stream + any in-flight TTS. Bound to Esc."""
         self._cancel_flag = True
+        if self._agent is not None:
+            from agent.executor import cancel_event
+            cancel_event.set()
         # Kill audio playback immediately — flips the global stop event so
         # the chunked PortAudio loop bails out within ~50 ms.
         try:
