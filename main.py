@@ -178,6 +178,7 @@ def main():
     manager.sig_point_at.connect(overlay.point_at)
     manager.sig_point_hold.connect(overlay.set_point_hold)
     manager.sig_point_release.connect(overlay.release_point)
+    manager.sig_point_retarget.connect(overlay.retarget)
 
     # Whiteboard annotations (legacy per-shape signals)
     manager.sig_arrow.connect(overlay.add_arrow)

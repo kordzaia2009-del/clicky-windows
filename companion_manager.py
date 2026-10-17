@@ -277,6 +277,7 @@ class CompanionManager(QObject):
     sig_point_at            = pyqtSignal(float, float, str)
     sig_point_hold          = pyqtSignal(bool)            # True → dwell forever until release
     sig_point_release       = pyqtSignal()                # end dwell + fly buddy back
+    sig_point_retarget      = pyqtSignal(float, float)    # nudge to a refined spot
     sig_error               = pyqtSignal(str)
     sig_transcript          = pyqtSignal(str)             # recognised speech, before answering
     sig_copilot_models_done = pyqtSignal(int)             # arg = model count
@@ -343,6 +344,7 @@ class CompanionManager(QObject):
         # Screenshots from the current turn — needed to map the LLM's
         # normalized 0-1000 tag coordinates back to logical screen pixels.
         self._screens_ctx: list = []
+        self._point_token = 0    # bumps per pointing gesture; stale refinements are dropped
         # Figures detected on screen this turn (normalized vertices) — used
         # for prompt injection and for snapping sloppy stroke endpoints.
         self._figures_ctx: list = []
@@ -1287,10 +1289,36 @@ class CompanionManager(QObject):
         for match in POINT_RE.finditer(text):
             x, y, label, scr = match.groups()
             lx, ly = self._denorm(float(x), float(y), int(scr or 1))
+            label = (label or "").strip()
             _log.info("pointing at %s,%s (%r) from the AI's tag", x, y, label)
-            self.sig_point_at.emit(lx, ly, (label or "").strip())
+            self.sig_point_at.emit(lx, ly, label)
+            self._refine_point_async(lx, ly, label, int(scr or 1))
         if CLEAR_RE.search(text):
             self.sig_clear_drawings.emit()
+
+    def _refine_point_async(self, x: float, y: float, label: str, screen_idx: int):
+        """Snap the AI's approximate point onto the element its label names
+        (ai/point_refiner.py). The overlay is already flying to the raw guess;
+        this only retargets it, so a slow or failed refinement costs nothing."""
+        self._point_token += 1
+        token = self._point_token
+        shot = self._shot(screen_idx)
+        scale = (shot.dpi_scale if shot else 1.0) or 1.0
+
+        def _work():
+            try:
+                from ai.point_refiner import refine
+                r = refine(x, y, label, scale)
+            except Exception:
+                _log.exception("point refinement failed")
+                return
+            if r is None or token != self._point_token:
+                return
+            if abs(r.x - x) + abs(r.y - y) < 6:
+                return   # already on target
+            self.sig_point_retarget.emit(r.x, r.y)
+
+        threading.Thread(target=_work, daemon=True).start()
 
     # ── Vertex snapping (figure-detector assisted accuracy) ─────────────────
 

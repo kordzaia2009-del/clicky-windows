@@ -67,7 +67,9 @@ _INTERACTIVE_TYPES = {
 
 
 def _normalize(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+    # Unicode-aware: an a-z-only filter turned every Georgian name into "",
+    # so Georgian UI elements could never match.
+    return re.sub(r"[\W_]+", " ", (s or "").lower()).strip()
 
 
 def _score_match(query: str, element_name: str, element_type: str) -> float:

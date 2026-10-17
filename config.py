@@ -84,9 +84,12 @@ edge; y=0 is the TOP, y=1000 the BOTTOM. The exact centre of the screen is
 500,500. Sizes/radii use the same scale (100 = 10% of screen width).
 
 POINTING: when you need to point at something, emit EXACTLY ONE tag
-[POINT:x,y:label:screen1] using normalized coordinates and a 1-3 word
-label written in Georgian,
-using any DETECTED ELEMENT coordinate provided above verbatim if given.
+[POINT:x,y:label:screen1] using normalized coordinates, using any
+DETECTED ELEMENT coordinate provided above verbatim if given. The label MUST
+be the target's own visible text copied exactly as it appears on screen, in
+whatever language it is written (e.g. "Google Chrome", "File", "Save") —
+Clicky searches the screen for that text to place the pointer precisely.
+Only if the target shows no text at all, use a 1-3 word Georgian description.
 
 DRAWING TAGS (coords normalized 0-1000, trailing :color always optional):
   [LINE:x1,y1->x2,y2:color]         straight line

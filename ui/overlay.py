@@ -217,6 +217,9 @@ class CursorOverlay(QWidget):
         # Optional highlight ring around detected element (x, y, radius)
         self._ring: Optional[tuple] = None
         self._ring_phase: float = 0.0
+        # Set when the target sits on the taskbar: the buddy parks just above
+        # it and draws an arrow down to this exact point instead.
+        self._arrow_target: Optional[QPointF] = None
 
         # Teaching annotations — list of shape dicts the overlay paints each
         # tick. Shapes animate in sequentially (progressive strokes) and
@@ -304,8 +307,9 @@ class CursorOverlay(QWidget):
         (same space Qt's QCursor.pos() uses). The buddy lands with the tip of
         its triangle on that pixel — the highlight ring marks the exact spot."""
         # Buddy's tip should sit on the target pixel. The triangle is drawn
-        # centred on _display_pos, so we just plant _display_pos there.
-        self._locked_pos = QPointF(x, y)
+        # centred on _display_pos, so we just plant _display_pos there —
+        # unless the target is on the taskbar (see _placement).
+        self._locked_pos, self._arrow_target = self._placement(x, y)
         self._bubble_text = label or random.choice(POINTER_PHRASES)
         self._bubble_scale = 0.5
         self._bubble_alpha = 0.0
@@ -314,6 +318,41 @@ class CursorOverlay(QWidget):
         self._ring_phase = 0.0
         self._lock_timer.stop()   # dwell controlled by phase machine, not timer
         self._begin_flight(self._display_pos, self._locked_pos, _PHASE_FLYING)
+
+    def retarget(self, x: float, y: float):
+        """Nudge the current pointing target (e.g. after snapping it onto the
+        matching on-screen text) without restarting the whole gesture."""
+        if self._locked_pos is None or self._flight_phase == _PHASE_RETURNING:
+            return
+        anchor, self._arrow_target = self._placement(x, y)
+        self._ring = (x, y, 26.0)
+        self._locked_pos = anchor
+        if self._flight_phase == _PHASE_FLYING:
+            self._fly_end_pos = QPointF(anchor)   # the curve bends to the new end
+        else:
+            self._begin_flight(self._display_pos, anchor, _PHASE_FLYING)
+
+    @staticmethod
+    def _placement(x: float, y: float):
+        """Where the buddy should sit for a target at (x, y), and the arrow
+        target if it can't sit on the target itself.
+
+        The taskbar is a topmost shell window that can cover the buddy, so a
+        target outside the screen's available area (= on the taskbar or another
+        docked bar, on whichever edge it lives) gets the buddy parked just
+        inside the free area with an arrow pointing at the exact spot."""
+        from PyQt6.QtCore import QPoint
+        target = QPointF(x, y)
+        screen = QApplication.screenAt(QPoint(int(x), int(y)))
+        if screen is None:
+            return target, None
+        avail = screen.availableGeometry()
+        if avail.contains(QPoint(int(x), int(y))):
+            return target, None
+        inset_x, inset_y = 50, 70
+        ax = min(max(x, avail.left() + inset_x), avail.right() - inset_x)
+        ay = min(max(y, avail.top() + inset_y), avail.bottom() - inset_y)
+        return QPointF(ax, ay), target
 
     def set_slow_mode(self, enabled: bool):
         """Doubles flight + dwell duration so students can track the motion."""
@@ -336,6 +375,7 @@ class CursorOverlay(QWidget):
             self._dwell_until = 0.0   # expires this tick → triggers return
         # Fade ring on next paint
         self._ring = None
+        self._arrow_target = None
 
     # ── Teaching annotations ─────────────────────────────────────────────────
 
@@ -459,6 +499,7 @@ class CursorOverlay(QWidget):
         self._rotation_deg = TRI_ROTATION_DEG
         self._hold_dwell = False
         self._ring = None
+        self._arrow_target = None
 
     def _tick(self):
         qp = QCursor.pos()
@@ -596,10 +637,50 @@ class CursorOverlay(QWidget):
             # idle, speaking, pointing
             self._draw_triangle(p, cx, cy)
 
+        if self._arrow_target is not None and self._flight_phase in (
+            _PHASE_FLYING, _PHASE_DWELLING
+        ):
+            self._draw_arrow(p, cx, cy)
+
         if self._locked_pos is not None and self._bubble_text:
-            self._draw_bubble(p, cx, cy, self._bubble_text)
+            # With an arrow below, put the label above so it stays clear of
+            # the taskbar.
+            by = cy - 46 if self._arrow_target is not None else cy
+            self._draw_bubble(p, cx, by, self._bubble_text)
 
         p.end()
+
+    def _draw_arrow(self, p, cx, cy):
+        """Arrow from the buddy to a target it can't sit on (the taskbar).
+        The tip bobs gently towards the target so it reads as 'down here'."""
+        tx = self._arrow_target.x() - self.x()
+        ty = self._arrow_target.y() - self.y()
+        dx, dy = tx - cx, ty - cy
+        dist = math.hypot(dx, dy)
+        if dist < 24:
+            return
+        ux, uy = dx / dist, dy / dist
+        a = self._bubble_alpha if self._flight_phase == _PHASE_FLYING else 1.0
+        bob = (math.sin(self._phase * 1.8) + 1) * 3     # 0..6 px
+        start = QPointF(cx + ux * 16, cy + uy * 16)
+        tip = QPointF(tx - ux * (4 + bob), ty - uy * (4 + bob))
+        head, half = 16.0, 9.0
+        base = QPointF(tip.x() - ux * head, tip.y() - uy * head)
+        left = QPointF(base.x() - uy * half, base.y() + ux * half)
+        right = QPointF(base.x() + uy * half, base.y() - ux * half)
+        path = QPainterPath(tip)
+        path.lineTo(left)
+        path.lineTo(right)
+        path.closeSubpath()
+        for col, width in ((QColor(255, 255, 255, int(230 * a)), 9),
+                           (QColor(CURSOR_BLUE.red(), CURSOR_BLUE.green(),
+                                   CURSOR_BLUE.blue(), int(255 * a)), 5)):
+            p.setPen(QPen(col, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(start, base)
+        p.setPen(QPen(QColor(255, 255, 255, int(230 * a)), 3))
+        p.setBrush(QColor(CURSOR_BLUE.red(), CURSOR_BLUE.green(), CURSOR_BLUE.blue(), int(255 * a)))
+        p.drawPath(path)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _draw_caption(self, p):
         now = time.monotonic()
