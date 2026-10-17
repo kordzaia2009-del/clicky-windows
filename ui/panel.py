@@ -5,10 +5,10 @@ from typing import Callable, Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSizePolicy, QComboBox, QFrame
+    QPushButton, QScrollArea, QSizePolicy, QComboBox, QFrame, QLineEdit
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QCursor
+from PyQt6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QCursor, QPixmap
 
 from ui.design import (
     PANEL_QSS, PANEL_WIDTH, PANEL_HEIGHT, PANEL_RADIUS,
@@ -36,10 +36,50 @@ def _hotkey_label() -> str:
 
 
 STATE_LABELS = {
-    AppState.IDLE:      f"თქვით „კლიკი“ ან დააჭირეთ {_hotkey_label()}",
+    AppState.IDLE:      f"თქვით „კლიპიტაური“ ან დააჭირეთ {_hotkey_label()}",
     AppState.LISTENING: "გისმენთ...",
     AppState.THINKING:  "ვფიქრობ...",
     AppState.SPEAKING:  "გპასუხობთ...",
+}
+
+LOGO_SIZE = 40
+
+
+def _logo_label() -> Optional[QLabel]:
+    """The panel's logo, from assets/logo.png.
+
+    Looked up next to the app first, so the logo can be swapped by replacing
+    that one file (no rebuild), then inside a PyInstaller bundle. Missing or
+    unreadable = no logo, never an error.
+    """
+    import sys
+    from pathlib import Path
+    from config import _HERE
+
+    candidates = [_HERE / "assets" / "logo.png"]
+    if getattr(sys, "_MEIPASS", None):
+        candidates.append(Path(sys._MEIPASS) / "assets" / "logo.png")
+    for path in candidates:
+        pix = QPixmap(str(path))
+        if not pix.isNull():
+            label = QLabel()
+            label.setPixmap(pix.scaled(
+                LOGO_SIZE, LOGO_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+            label.setFixedSize(LOGO_SIZE, LOGO_SIZE)
+            return label
+    return None
+
+
+# The big button's label follows the state: it starts listening, finishes
+# early while listening, and stops a long answer while thinking/speaking.
+BUTTON_LABELS = {
+    AppState.IDLE:      "🎤  დააჭირეთ და ილაპარაკეთ",
+    AppState.LISTENING: "■  დავამთავრე",
+    AppState.THINKING:  "■  გაჩერება",
+    AppState.SPEAKING:  "■  გაჩერება",
 }
 
 STATE_COLORS = {
@@ -146,8 +186,11 @@ class ProviderBadge(QLabel):
 class CompanionPanel(QWidget):
     """Floating companion control panel — equivalent to CompanionPanelView.swift."""
 
-    on_push_to_talk_pressed  = pyqtSignal()
-    on_push_to_talk_released = pyqtSignal()
+    on_ask_clicked           = pyqtSignal()        # big button
+    on_text_submitted        = pyqtSignal(str)     # typed question
+    on_shown                 = pyqtSignal()        # lets the pointer re-raise above us
+    _sig_question            = pyqtSignal(str)
+    _sig_error               = pyqtSignal(str)
     on_model_changed         = pyqtSignal(str)
     on_ollama_refresh_requested = pyqtSignal()
     on_document_dropped      = pyqtSignal(str)
@@ -167,6 +210,8 @@ class CompanionPanel(QWidget):
         # Wire internal thread-safe signals → main-thread slots
         self._sig_copilot_code.connect(self._on_copilot_code)
         self._sig_copilot_error.connect(self._on_copilot_error)
+        self._sig_question.connect(self._on_question)
+        self._sig_error.connect(self._on_error)
 
     def _setup_window(self):
         self.setWindowFlags(
@@ -175,6 +220,9 @@ class CompanionPanel(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Popping up with an answer must not pull focus out of the app the
+        # user is working in.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedSize(PANEL_WIDTH, PANEL_HEIGHT)
         self.setObjectName("panel")
         self.setStyleSheet(PANEL_QSS)
@@ -199,7 +247,11 @@ class CompanionPanel(QWidget):
 
         # Header
         header = QHBoxLayout()
-        title = QLabel("კლიკი")
+        logo = _logo_label()
+        if logo is not None:
+            header.addWidget(logo)
+            header.addSpacing(6)
+        title = QLabel("კლიპიტაური")
         title.setObjectName("title")
         title.setFont(FONT_TITLE)
         header.addWidget(title)
@@ -244,6 +296,15 @@ class CompanionPanel(QWidget):
         self._waveform.setVisible(False)
         root.addWidget(self._waveform)
 
+        # The question being answered (spoken or typed)
+        self._question_label = QLabel()
+        self._question_label.setWordWrap(True)
+        self._question_label.setStyleSheet(
+            "color: rgb(150,185,255); font-size: 14px; font-weight: 600; padding: 0 8px;"
+        )
+        self._question_label.setVisible(False)
+        root.addWidget(self._question_label)
+
         # Response area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -258,11 +319,36 @@ class CompanionPanel(QWidget):
         scroll.setWidget(self._response_label)
         root.addWidget(scroll, stretch=1)
 
-        # Push-to-talk button
-        self._ptt_btn = QPushButton(f"თქვით „კლიკი“ ან დააჭირეთ {_hotkey_label()}")
+        # Typed question — works even when speech recognition can't
+        type_row = QHBoxLayout()
+        self._text_input = QLineEdit()
+        self._text_input.setPlaceholderText("ან აქ დაწერეთ კითხვა…")
+        self._text_input.setStyleSheet(
+            "QLineEdit { background: rgba(40,40,50,220); border: 1px solid rgba(80,80,100,200);"
+            "border-radius: 8px; color: rgb(235,235,245); padding: 8px; font-size: 14px; }"
+            "QLineEdit:focus { border-color: rgba(0,120,255,220); }"
+        )
+        self._text_input.returnPressed.connect(self._submit_text)
+        send_btn = QPushButton("გაგზავნა")
+        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        send_btn.setStyleSheet(
+            "QPushButton { background: rgb(0,110,235); color: white; border: none;"
+            "border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover { background: rgb(30,135,255); }"
+        )
+        send_btn.clicked.connect(self._submit_text)
+        type_row.addWidget(self._text_input, stretch=1)
+        type_row.addWidget(send_btn)
+        root.addLayout(type_row)
+
+        # Talk button — the same as tapping the hotkey
+        self._ptt_btn = QPushButton(BUTTON_LABELS[AppState.IDLE])
         self._ptt_btn.setObjectName("hotkey_btn")
         self._ptt_btn.setFont(FONT_LABEL)
-        self._ptt_btn.setFixedHeight(44)
+        self._ptt_btn.setFixedHeight(48)
+        self._ptt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ptt_btn.setToolTip(f"ან თქვით „კლიპიტაური“, ან დააჭირეთ {_hotkey_label()}")
+        self._ptt_btn.clicked.connect(self.on_ask_clicked)
         root.addWidget(self._ptt_btn)
 
         # Footer: model selector + provider info
@@ -367,6 +453,7 @@ class CompanionPanel(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.on_shown.emit()
         # A model pulled while Clicky was running should appear without a
         # restart; a throttled re-poll on open keeps the list current.
         if cfg.llm_provider() == "ollama":
@@ -396,6 +483,7 @@ class CompanionPanel(QWidget):
             f"color: rgb({color.red()},{color.green()},{color.blue()}); font-size: 10px;"
         )
         self._status_label.setText(STATE_LABELS[state])
+        self._ptt_btn.setText(BUTTON_LABELS[state])
         self._waveform.setVisible(state == AppState.LISTENING)
         if state == AppState.LISTENING:
             self._waveform.start()
@@ -410,6 +498,40 @@ class CompanionPanel(QWidget):
     def append_response_chunk(self, chunk: str):
         self._response_text += chunk
         self._response_label.setText(self._response_text)
+
+    def _submit_text(self):
+        text = self._text_input.text().strip()
+        if not text:
+            return
+        if self._state != AppState.IDLE:
+            # Busy answering — keep the text so it isn't lost.
+            self._status_label.setText("ერთი წუთით — ჯერ წინა კითხვას ვპასუხობ.")
+            return
+        self._text_input.clear()
+        self.on_text_submitted.emit(text)
+
+    def show_question(self, text: str):
+        """Thread-safe: a new question starts — show it, clear the old answer."""
+        self._sig_question.emit(text)
+
+    def show_error(self, text: str):
+        """Thread-safe: show an error in the answer area, not just a toast."""
+        self._sig_error.emit(text)
+
+    def _on_question(self, text: str):
+        self._question_label.setText(f"თქვენ: {text}")
+        self._question_label.setVisible(True)
+        self.clear_response()
+        if not self.isVisible():
+            self.show()
+
+    def _on_error(self, text: str):
+        if self._response_text:
+            self._response_text += "\n\n"
+        self._response_text += f"⚠️ {text}"
+        self._response_label.setText(self._response_text)
+        if not self.isVisible():
+            self.show()
 
     def set_audio_level(self, rms: float):
         self._waveform.set_level(rms)
@@ -438,7 +560,7 @@ class CompanionPanel(QWidget):
             f"2.  შეიყვანეთ კოდი:\n\n"
             f"        {user_code}\n\n"
             "3.  GitHub-ში დააჭირეთ Authorize-ს.\n\n"
-            "ავტორიზაციის შემდეგ კლიკი ავტომატურად შევა."
+            "ავტორიზაციის შემდეგ კლიპიტაური ავტომატურად შევა."
         )
         self._response_label.setText(self._response_text)
         self._status_label.setText("ველოდები Copilot-ის ავტორიზაციას…")

@@ -156,6 +156,7 @@ async def detect_element(
         "anthropic-version": "2023-06-01",
         "anthropic-beta": _BETA_HEADER,
         "content-type": "application/json",
+        **cfg.anthropic_headers(),
     }
 
     try:

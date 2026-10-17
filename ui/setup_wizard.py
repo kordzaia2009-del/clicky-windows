@@ -84,7 +84,7 @@ class SetupWizard(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("კლიკის დაყენება")
+        self.setWindowTitle("კლიპიტაურის დაყენება")
         self.setModal(False)
         self.setMinimumSize(600, 420)
         self.setStyleSheet("""
@@ -128,7 +128,7 @@ class SetupWizard(QDialog):
         layout.setContentsMargins(32, 28, 32, 24)
         layout.setSpacing(14)
 
-        self.title = QLabel("მოგესალმებათ კლიკი")
+        self.title = QLabel("მოგესალმებათ კლიპიტაური")
         self.title.setObjectName("title")
         layout.addWidget(self.title)
 
@@ -190,13 +190,13 @@ class SetupWizard(QDialog):
         self.skip_btn.setText("გამოტოვება")
 
         if step == "welcome":
-            self.title.setText("გაიცანით კლიკი")
+            self.title.setText("გაიცანით კლიპიტაური")
             self.subtitle.setText(
-                "კლიკი არის AI მასწავლებელი, რომელიც კურსორთან ცხოვრობს და "
+                "კლიპიტაური არის AI მასწავლებელი, რომელიც კურსორთან ცხოვრობს და "
                 "თქვენს ეკრანს ხედავს — ამიტომ საჭირო ადგილს პირდაპირ გაჩვენებთ.\n\n"
-                f"•  დააჭირეთ {_pretty_hotkey()} ან უბრალოდ თქვით „კლიკი“, "
+                f"•  დააჭირეთ {_pretty_hotkey()} ან უბრალოდ თქვით „კლიპიტაური“, "
                 "შემდეგ ხმამაღლა დასვით კითხვა.\n"
-                "•  კლიკი ხმით გიპასუხებთ და ეკრანზე ისრებს, წრეებს და "
+                "•  კლიპიტაური ხმით გიპასუხებთ და ეკრანზე ისრებს, წრეებს და "
                 "წარწერებს დახატავს.\n"
                 "•  ჰკითხეთ ყველაფერი, რასაც ეკრანზე ხედავთ — დოკუმენტი, "
                 "შეცდომის შეტყობინება, პარამეტრების გვერდი.\n"
@@ -255,7 +255,7 @@ class SetupWizard(QDialog):
                 # One multimodal model covers both jobs, so there is only one
                 # download to offer — not a text step followed by a vision step
                 # that asks for the same file again.
-                self.title.setText("კლიკის AI მოდელის ჩამოტვირთვა")
+                self.title.setText("კლიპიტაურის AI მოდელის ჩამოტვირთვა")
                 self.subtitle.setText(
                     f"ჩამოიტვირთება {name} (≈{_size_hint(name)}). ის პასუხობს კითხვებს და "
                     f"კითხულობს ეკრანს — მითითება, სურათები, დიაგრამები — ასე რომ, "
@@ -266,7 +266,7 @@ class SetupWizard(QDialog):
                 self.title.setText("ტექსტური მოდელის ჩამოტვირთვა")
                 self.subtitle.setText(
                     f"ჩამოიტვირთება {name} (≈{_size_hint(name)}). სწორედ ის პასუხობს, "
-                    f"როცა კლიკის კითხვას უსვამთ."
+                    f"როცა კლიპიტაურის კითხვას უსვამთ."
                 )
                 self.skip_btn.setText("ამ მოდელის გამოტოვება")
             self.action_btn.setText(f"{name}-ის ჩამოტვირთვა")
@@ -282,7 +282,7 @@ class SetupWizard(QDialog):
             name = cfg.ollama_vision_model
             self.title.setText("ხედვის მოდელის ჩამოტვირთვა (არასავალდებულო)")
             self.subtitle.setText(
-                f"ჩამოიტვირთება {name} (≈{_size_hint(name)}). საჭიროა მხოლოდ მაშინ, როცა კლიკი "
+                f"ჩამოიტვირთება {name} (≈{_size_hint(name)}). საჭიროა მხოლოდ მაშინ, როცა კლიპიტაური "
                 f"ეკრანს კითხულობს — მითითება, სურათები, დიაგრამები. შეგიძლიათ "
                 f"გამოტოვოთ და მოგვიანებით ხატულის მენიუდან დაამატოთ."
             )
@@ -299,7 +299,7 @@ class SetupWizard(QDialog):
         elif step == "keys":
             self.title.setText("API გასაღების დამატება")
             self.subtitle.setText(
-                "ჩასვით Claude-ის, OpenAI-ის ან Gemini-ის გასაღები. კლიკი შეინახავს და "
+                "ჩასვით Claude-ის, OpenAI-ის ან Gemini-ის გასაღები. კლიპიტაური შეინახავს და "
                 "მაშინვე დაიწყებს გამოყენებას — მოგვიანებით შეცვლა შეგიძლიათ აქ: "
                 "ხატულა → პარამეტრები და დიაგნოსტიკა → API გასაღებები."
             )
@@ -313,8 +313,8 @@ class SetupWizard(QDialog):
             self.title.setText("ყველაფერი მზადაა 🎉")
             providers = cfg.describe()
             self.subtitle.setText(
-                f"კლიკი მზადაა და მუშაობს {providers['llm']}-ზე.\n\n"
-                f"•  დააჭირეთ {_pretty_hotkey()} და ილაპარაკეთ, ან თქვით „კლიკი“.\n"
+                f"კლიპიტაური მზადაა და მუშაობს {providers['llm']}-ზე.\n\n"
+                f"•  დააჭირეთ {_pretty_hotkey()} და ილაპარაკეთ, ან თქვით „კლიპიტაური“.\n"
                 "•  გრძელი პასუხის შესაწყვეტად დააჭირეთ Esc-ს.\n"
                 "•  პარამეტრებისთვის ხატულაზე დააჭირეთ მარჯვენა ღილაკით.\n"
                 "•  PDF ფაილი პანელზე გადმოიტანეთ და ჰკითხეთ მის შესახებ."

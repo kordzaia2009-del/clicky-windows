@@ -74,7 +74,7 @@ class TrayManager(QObject):
         self._tray = QSystemTrayIcon()
         self._tray.setIcon(self._icons["idle"])
         self._tray.setToolTip(
-            f"კლიკი — AI თანაშემწე\nდააჭირეთ {cfg.hotkey} და ილაპარაკეთ"
+            f"კლიპიტაური — AI თანაშემწე\nდააჭირეთ {cfg.hotkey} და ილაპარაკეთ"
         )
         self._search_enabled = True
         # Mirrors the persisted mic mode — off by default, so Clicky only
@@ -156,8 +156,8 @@ class TrayManager(QObject):
         self._search_action = search_action
 
         wake_action = menu.addAction(
-            "მუდმივი მოსმენა („კლიკი“): ჩართულია" if self._wake_enabled
-            else "მუდმივი მოსმენა („კლიკი“): გამორთულია — სალაპარაკოდ დააჭირეთ კლავიშებს"
+            "მუდმივი მოსმენა („კლიპიტაური“): ჩართულია" if self._wake_enabled
+            else "მუდმივი მოსმენა („კლიპიტაური“): გამორთულია — სალაპარაკოდ დააჭირეთ კლავიშებს"
         )
         wake_action.setCheckable(True)
         wake_action.setChecked(self._wake_enabled)
@@ -166,7 +166,7 @@ class TrayManager(QObject):
 
         self._build_language_submenu(menu)
 
-        scope_label = "ინსტრუქციები კლიკისთვის…"
+        scope_label = "ინსტრუქციები კლიპიტაურისთვის…"
         scope_action = menu.addAction(scope_label)
         scope_action.triggered.connect(self._prompt_custom_instructions)
 
@@ -255,7 +255,7 @@ class TrayManager(QObject):
         wf_menu = menu.addMenu("მოქმედებების ჩაწერა")
         wf_start = wf_menu.addAction("ჩემი დაწკაპუნებების ჩაწერის დაწყება")
         wf_start.triggered.connect(self.on_workflow_start)
-        wf_stop  = wf_menu.addAction("შეწყვეტა და კლიკისთვის გაგზავნა")
+        wf_stop  = wf_menu.addAction("შეწყვეტა და კლიპიტაურისთვის გაგზავნა")
         wf_stop.triggered.connect(self.on_workflow_stop)
 
         # ── Live collaboration ──
@@ -284,7 +284,7 @@ class TrayManager(QObject):
 
         menu.addSeparator()
 
-        quit_action = menu.addAction("კლიკის დახურვა")
+        quit_action = menu.addAction("კლიპიტაურის დახურვა")
         quit_action.triggered.connect(self.on_quit)
 
         self._tray.setContextMenu(menu)
@@ -302,7 +302,7 @@ class TrayManager(QObject):
 
     def _prompt_custom_instructions(self):
         dlg = QDialog(None)
-        dlg.setWindowTitle("ინსტრუქციები კლიკისთვის")
+        dlg.setWindowTitle("ინსტრუქციები კლიპიტაურისთვის")
         dlg.setMinimumSize(480, 380)
         dlg.setStyleSheet("""
             QDialog { background-color: #1e1e24; }
@@ -327,12 +327,12 @@ class TrayManager(QObject):
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(10)
 
-        title = QLabel("ინსტრუქციები კლიკისთვის")
+        title = QLabel("ინსტრუქციები კლიპიტაურისთვის")
         title.setStyleSheet("font-size: 15px; font-weight: 600; color: #ffffff;")
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "ცვლის კლიკის ძირითად ქცევას (სახელი, წესები, ტონი).\n"
+            "ცვლის კლიპიტაურის ძირითად ქცევას (სახელი, წესები, ტონი).\n"
             "{{CONTEXT}} და {{TODAY}} ჩანაცვლების ადგილებია — სჯობს დატოვოთ."
         )
         subtitle.setStyleSheet("color: #9a9aa4; font-size: 12px;")
@@ -519,7 +519,7 @@ class TrayManager(QObject):
     def _toggle_wake(self, checked: bool):
         self._wake_enabled = checked
         self._wake_action.setText(
-            "მუდმივი მოსმენა („კლიკი“): ჩართულია" if checked else "მუდმივი მოსმენა („კლიკი“): გამორთულია"
+            "მუდმივი მოსმენა („კლიპიტაური“): ჩართულია" if checked else "მუდმივი მოსმენა („კლიპიტაური“): გამორთულია"
         )
         self.on_toggle_wake_word.emit(checked)
 

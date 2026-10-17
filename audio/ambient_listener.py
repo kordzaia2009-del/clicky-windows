@@ -3,11 +3,13 @@ Always-on ambient audio listener.
 Handles:
   - Continuous mic stream (single sounddevice input)
   - Energy-based VAD to detect speech segments
-  - Wake-word detection via faster-whisper tiny model (triggers on "clicky" / "hey clicky")
+  - Wake-word detection via faster-whisper tiny model (triggers on
+    „კლიპიტაური“ / „კლიკი“ and the English renderings Whisper makes of them)
   - Push-to-talk buffering when hotkey is held
   - Streams RMS level to UI (cursor waveform + panel)
 """
 
+import re
 import threading
 import time
 from enum import Enum, auto
@@ -27,19 +29,27 @@ class Mode(Enum):
 # ── Tuning knobs ──────────────────────────────────────────────────────────────
 BLOCK_MS           = 30              # mic callback granularity
 FRAMES_PER_BLOCK   = int(SAMPLE_RATE * BLOCK_MS / 1000)
-ENERGY_THRESHOLD   = 0.006           # lower = catches quieter speech
+ENERGY_THRESHOLD   = 0.006           # floor for the speech threshold
+# Speech = louder than NOISE_MARGIN x the room's background level. A fixed
+# threshold failed on a mic whose background noise sat above it: every
+# segment ran to the maximum length, Whisper ran non-stop on the CPU, and
+# end-of-speech was never detected (recordings always hit the 45 s cap).
+NOISE_MARGIN       = 3.0
+NOISE_FALL         = 0.10            # floor tracks quieter levels quickly...
+NOISE_RISE         = 0.002           # ...and louder ones slowly (speech is brief)
 MIN_SPEECH_BLOCKS  = 3               # ~90ms of speech to start a segment
 SILENCE_BLOCKS_END = 20              # ~600ms of silence ends a segment
 MAX_SEGMENT_BLOCKS = 120             # ~3.6s max wake-word segment
 PRE_ROLL_BLOCKS    = 18              # ~540ms of pre-roll for the wake word
 
-# Wake phrases — whisper tiny often mis-transcribes "clicky" so we cover variants
-WAKE_WORDS = (
-    "clicky", "click e", "click he", "click me", "clickie", "clicki",
-    "cliki", "klicki", "klicky", "kilicky", "clickey", "clickity",
-    "hey clicky", "hi clicky", "hey click", "ok clicky", "yo clicky",
-    "hey clicki", "hey klicki", "hey clickie",
-)
+# Wake word. tiny.en is English-only, so it renders the Georgian name as
+# English: measured on Georgian TTS, „კლიკი“ -> "clicky", „კლიკიტაური“ ->
+# "click it out" / "Click it over here."; a real user's "kliki" came out as
+# "kliq kliq kliq". The current name „კლიპიტაური“ comes out as "Klipitauri"
+# with the initial prompt below. All share a k/c + l + i + k/q/p stem, so
+# match that instead of listing spellings (the old list had "cliki" but not
+# "kliki").
+WAKE_RE = re.compile(r"\b[ck]+l+[iey]+(?:ck|k|q|c|pp|p)", re.IGNORECASE)
 
 
 class AmbientListener:
@@ -88,6 +98,9 @@ class AmbientListener:
 
         # Enable/disable toggle
         self._wake_word_enabled = True
+
+        # Background-noise level, learned from the mic (None until first block)
+        self._noise_floor: Optional[float] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -183,6 +196,20 @@ class AmbientListener:
             self._close_stream()
 
     @property
+    def speech_threshold(self) -> float:
+        """RMS above which a block counts as speech, adapted to the room."""
+        if self._noise_floor is None:
+            return ENERGY_THRESHOLD
+        return max(ENERGY_THRESHOLD, self._noise_floor * NOISE_MARGIN)
+
+    def _track_noise(self, rms: float) -> None:
+        if self._noise_floor is None:
+            self._noise_floor = rms
+            return
+        k = NOISE_FALL if rms < self._noise_floor else NOISE_RISE
+        self._noise_floor += (rms - self._noise_floor) * k
+
+    @property
     def ambient(self) -> bool:
         return self._ambient
 
@@ -204,6 +231,7 @@ class AmbientListener:
             )
         pcm_float = pcm_int16.astype(np.float32) / 32768.0
         rms = float(np.sqrt(np.mean(pcm_float ** 2)))
+        self._track_noise(rms)
         self._on_level(rms)
 
         if self._mode == Mode.RECORDING:
@@ -219,7 +247,7 @@ class AmbientListener:
         if len(self._preroll) > PRE_ROLL_BLOCKS:
             self._preroll.pop(0)
 
-        is_speech = rms > ENERGY_THRESHOLD
+        is_speech = rms > self.speech_threshold
 
         if not self._in_segment:
             if is_speech:
@@ -271,7 +299,7 @@ class AmbientListener:
             text = self._transcribe_tiny(pcm).lower().strip()
             if not text:
                 return
-            if any(w in text for w in WAKE_WORDS):
+            if WAKE_RE.search(text):
                 self._on_wake()
         except Exception:
             pass
@@ -292,7 +320,7 @@ class AmbientListener:
             condition_on_previous_text=False,
             no_speech_threshold=0.45,
             temperature=0.0,
-            initial_prompt="Clicky is a helpful AI assistant.",
+            initial_prompt="Klipi. Klipitauri.",
         )
         return " ".join(s.text for s in segments)
 

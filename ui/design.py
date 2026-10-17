@@ -31,8 +31,8 @@ FONT_TITLE    = font(15, QFont.Weight.Bold)
 FONT_RESPONSE = font(13)
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
-PANEL_WIDTH   = 340
-PANEL_HEIGHT  = 480
+PANEL_WIDTH   = 380
+PANEL_HEIGHT  = 560
 PANEL_RADIUS  = 16
 CURSOR_RADIUS = 18
 
@@ -62,7 +62,7 @@ QLabel#status {{
     color: rgb(140, 140, 160);
 }}
 QLabel#response {{
-    font-size: 13px;
+    font-size: 16px;
     color: rgb(220, 220, 230);
     padding: 8px;
 }}

@@ -29,9 +29,12 @@ PROVIDERS = [
     ("ANTHROPIC_API_KEY",  "Anthropic — Claude",
      "https://console.anthropic.com/settings/keys",
      "საუკეთესო პასუხები და ეკრანის გაგება."),
+    ("ANTHROPIC_WORKSPACE_ID", "Anthropic — Workspace ID",
+     "https://console.anthropic.com/settings/workspaces",
+     "საჭიროა, თუ გასაღები არ არის მიბმული workspace-ზე (wrkspc_01…)."),
     ("OPENAI_API_KEY",     "OpenAI — GPT",
      "https://platform.openai.com/api-keys",
-     "ასევე აუმჯობესებს მეტყველების ამოცნობას და კლიკის ხმას."),
+     "ასევე აუმჯობესებს მეტყველების ამოცნობას და კლიპიტაურის ხმას."),
     ("GOOGLE_API_KEY",     "Google — Gemini",
      "https://aistudio.google.com/app/apikey",
      "დიდი უფასო ლიმიტი."),
@@ -95,7 +98,7 @@ class ApiKeysDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("კლიკი — API გასაღებები")
+        self.setWindowTitle("კლიპიტაური — API გასაღებები")
         self.setModal(False)
         self.setMinimumSize(560, 560)
         self.setStyleSheet(STYLE)
@@ -115,7 +118,7 @@ class ApiKeysDialog(QDialog):
         root.addWidget(title)
 
         subtitle = QLabel(
-            "კლიკი Ollama-ით გასაღებების გარეშეც მუშაობს. გასაღები აქ "
+            "კლიპიტაური Ollama-ით გასაღებების გარეშეც მუშაობს. გასაღები აქ "
             "მხოლოდ მაშინ დაამატეთ, თუ ღრუბლოვანი მოდელი გსურთ — ყველა ველი არასავალდებულოა."
         )
         subtitle.setObjectName("subtitle")

@@ -64,8 +64,28 @@ STOP_RE = re.compile(r"^\s*(stop|quit|cancel|never\s*mind|nevermind)[\s.!?]*$",
                      re.IGNORECASE)
 
 
+# Georgian equivalents. Georgian is agglutinative, so these are stems that
+# cover the polite/plural forms too („მაჩვენე“/„მაჩვენეთ“). Without them a
+# Georgian "where is…" never reached the element locator and the pointer only
+# moved if the AI happened to write a [POINT] tag on its own.
+LOCATE_KA_RE = re.compile(
+    r"სად\s*(?:არის|არი|აა|არ)|სადაა|მ[აი]ჩვენე|მ[აი]ნახე|აჩვენე|მიმითითე|"
+    r"მიუთითე|მანიშნე|მიანიშნე|დავაჭირო|ვიპოვო|ვერ\s+ვპოულობ|ვერ\s+ვიპოვე|"
+    r"მიიტანე|მიდი\s+იქ|გადადი|წადი"
+)
+NEXT_KA_RE = re.compile(
+    r"^\s*(?:შემდეგი|შემდეგ|გააგრძელე|გააგრძელეთ|გავაგრძელოთ|მერე)[\s.!?]*$"
+)
+STOP_KA_RE = re.compile(
+    r"^\s*(?:გაჩერდი|გაჩერდით|გაჩერება|გააჩერე|შეწყვიტე|შეწყვიტეთ|კმარა|საკმარისია)[\s.!?]*$"
+)
+REPEAT_KA_RE = re.compile(
+    r"^\s*(?:გაიმეორე|გაიმეორეთ|კიდევ\s+ერთხელ|ვერ\s+გავიგე|რა\s+თქვი|რა\s+თქვით)[\s.!?]*$"
+)
+
+
 def is_locate(q: str) -> bool:
-    return LOCATE_RE.search(q) is not None
+    return LOCATE_RE.search(q) is not None or LOCATE_KA_RE.search(q or "") is not None
 
 
 def is_multistep(q: str) -> bool:
@@ -73,11 +93,11 @@ def is_multistep(q: str) -> bool:
 
 
 def is_next(q: str) -> bool:
-    return NEXT_RE.match(q or "") is not None
+    return NEXT_RE.match(q or "") is not None or NEXT_KA_RE.match(q or "") is not None
 
 
 def is_stop(q: str) -> bool:
-    return STOP_RE.match(q or "") is not None
+    return STOP_RE.match(q or "") is not None or STOP_KA_RE.match(q or "") is not None
 
 
 # ── New voice classifiers ────────────────────────────────────────────────────
@@ -137,7 +157,7 @@ def is_identity_question(q: str) -> bool:
 
 
 def is_repeat(q: str) -> bool:
-    return REPEAT_RE.match(q or "") is not None
+    return REPEAT_RE.match(q or "") is not None or REPEAT_KA_RE.match(q or "") is not None
 
 
 def is_journal_today(q: str) -> bool:

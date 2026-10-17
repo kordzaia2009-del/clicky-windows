@@ -86,6 +86,7 @@ for pkg in (
     "langdetect",
     "pynput",
     "pywhispercpp",
+    "speech_recognition",       # Georgian STT — ships the FLAC encoder it needs
 ):
     try:
         d, b, h = collect_all(pkg)
@@ -96,6 +97,9 @@ for pkg in (
         pass  # package not installed — that path is optional anyway
 
 hiddenimports += hidden
+
+# Panel logo — also read from next to Clicky.exe, so it can be swapped there.
+datas += [("assets/logo.png", "assets")]
 hiddenimports += collect_submodules("PyQt6")
 
 

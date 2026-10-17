@@ -39,6 +39,17 @@ def _friendly_error(e: Exception, model: str) -> str | None:
             f"Anthropic doesn't offer '{model}' — it may have been retired. "
             f"Pick another model in the panel."
         )
+    if isinstance(e, anthropic.BadRequestError) and "credit balance is too low" in str(e):
+        return (
+            "Claude-ის ანგარიშზე კრედიტი ამოიწურა. საჭიროა ბალანსის შევსება "
+            "Anthropic Console-ში: Plans & Billing."
+        )
+    if isinstance(e, anthropic.BadRequestError) and "anthropic-workspace-id" in str(e):
+        return (
+            "Claude-ის გასაღებს სამუშაო სივრცე (workspace) სჭირდება. "
+            "ჩაწერეთ Workspace ID აქ: ხატულა → პარამეტრები და დიაგნოსტიკა → "
+            "API გასაღებები, ან გამოიყენეთ workspace-ზე მიბმული გასაღები."
+        )
     if isinstance(e, anthropic.AuthenticationError):
         return "Anthropic rejected your API key. Check it under Tray → Setup & Diagnostics → API Keys."
     if isinstance(e, anthropic.PermissionDeniedError):
@@ -49,7 +60,10 @@ def _friendly_error(e: Exception, model: str) -> str | None:
 class ClaudeProvider(BaseLLMProvider):
 
     def __init__(self, client=None):
-        self._client = client or anthropic.AsyncAnthropic(api_key=cfg.anthropic_api_key)
+        self._client = client or anthropic.AsyncAnthropic(
+            api_key=cfg.anthropic_api_key,
+            default_headers=cfg.anthropic_headers(),
+        )
 
     async def stream_response(
         self,
@@ -119,6 +133,9 @@ class ClaudeProvider(BaseLLMProvider):
                     del kwargs["output_config"]
                     kwargs["max_tokens"] = MAX_TOKENS
                     continue
+                friendly = _friendly_error(e, model)
+                if friendly:
+                    raise RuntimeError(friendly) from e
                 raise
             except Exception as e:
                 friendly = _friendly_error(e, model)

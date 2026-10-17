@@ -261,6 +261,7 @@ async def _fetch_claude() -> list[dict]:
                 headers={
                     "x-api-key": cfg.anthropic_api_key,
                     "anthropic-version": "2023-06-01",
+                    **cfg.anthropic_headers(),
                 },
             )
             r.raise_for_status()

@@ -164,6 +164,7 @@ CAPTION_MAX_CHARS = 220
 CAPTION_FADE_IN_S = 0.25
 CAPTION_FADE_OUT_S = 0.6
 CAPTION_LINGER_S  = 5.0     # stays this long after the answer finishes
+CAPTION_BG_ALPHA  = 128     # 0-255; half see-through so the screen shows behind it
 
 # Teacher-pace pointing timings (seconds)
 # Flight duration scales with distance but stays slow enough to follow visually.
@@ -254,6 +255,13 @@ class CursorOverlay(QWidget):
         self._tick_timer = QTimer(self)
         self._tick_timer.timeout.connect(self._tick)
         self._tick_timer.start(16)
+
+        # The panel and dialogs are always-on-top windows too, and whichever
+        # was raised last wins — so the pointer used to vanish behind the
+        # panel. Re-assert the overlay's place at the top of the stack.
+        self._top_timer = QTimer(self)
+        self._top_timer.timeout.connect(self.keep_on_top)
+        self._top_timer.start(1000)
 
         # Release bubble / pointing
         self._lock_timer = QTimer(self)
@@ -409,6 +417,22 @@ class CursorOverlay(QWidget):
         self._flight_phase = phase
         self._vel = QPointF(0, 0)
 
+    def keep_on_top(self):
+        """Put the overlay above every other topmost window, including the
+        app's own panel and dialogs, without taking keyboard focus."""
+        if not self.isVisible():
+            return
+        try:
+            import ctypes
+            HWND_TOPMOST = -1
+            SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+            ctypes.windll.user32.SetWindowPos(
+                int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass   # non-Windows / no window handle yet — nothing to do
+
     def hide_cursor(self):
         self._release_lock()
         self.set_mode(MODE_IDLE)
@@ -556,6 +580,11 @@ class CursorOverlay(QWidget):
         if self._annotations:
             self._draw_annotations(p)
 
+        # Caption under the buddy as well — the pointer is always the top
+        # layer, so it stays visible when it flies over the caption.
+        if self._caption_text:
+            self._draw_caption(p)
+
         cx = self._display_pos.x() - self.x()
         cy = self._display_pos.y() - self.y()
 
@@ -569,9 +598,6 @@ class CursorOverlay(QWidget):
 
         if self._locked_pos is not None and self._bubble_text:
             self._draw_bubble(p, cx, cy, self._bubble_text)
-
-        if self._caption_text:
-            self._draw_caption(p)
 
         p.end()
 
@@ -615,21 +641,28 @@ class CursorOverlay(QWidget):
         box = QRectF(left, top, box_w, box_h)
 
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(12, 14, 20, int(225 * alpha)))
+        p.setBrush(QColor(12, 14, 20, int(CAPTION_BG_ALPHA * alpha)))
         p.drawRoundedRect(box, 18, 18)
-        p.setPen(QPen(QColor(0x33, 0x80, 0xFF, int(200 * alpha)), 2))
+        p.setPen(QPen(QColor(0x33, 0x80, 0xFF, int(150 * alpha)), 2))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(box, 18, 18)
 
+        # With the lighter box, a soft dark shadow keeps the text readable
+        # over bright windows behind it.
+        head_rect = QRectF(left, top + pad, box_w, head_h)
+        body_rect = QRectF(left + pad, top + pad + head_h + 6,
+                           box_w - 2 * pad, body.height())
+        shadow = QColor(0, 0, 0, int(200 * alpha))
         p.setFont(head_font)
-        p.setPen(QColor(170, 190, 230, int(255 * alpha)))
-        p.drawText(QRectF(left, top + pad, box_w, head_h),
-                   int(Qt.AlignmentFlag.AlignHCenter), CAPTION_HEADER)
+        p.setPen(shadow)
+        p.drawText(head_rect.translated(1.5, 1.5), int(Qt.AlignmentFlag.AlignHCenter), CAPTION_HEADER)
+        p.setPen(QColor(190, 210, 245, int(255 * alpha)))
+        p.drawText(head_rect, int(Qt.AlignmentFlag.AlignHCenter), CAPTION_HEADER)
         p.setFont(body_font)
+        p.setPen(shadow)
+        p.drawText(body_rect.translated(2, 2), flags, self._caption_text)
         p.setPen(QColor(255, 255, 255, int(255 * alpha)))
-        p.drawText(QRectF(left + pad, top + pad + head_h + 6,
-                          box_w - 2 * pad, body.height()),
-                   flags, self._caption_text)
+        p.drawText(body_rect, flags, self._caption_text)
 
     def _draw_annotations(self, p):
         """Render teaching shapes with progressive draw-in animation.

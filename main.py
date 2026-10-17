@@ -70,7 +70,7 @@ def _copilot_login_flow(tray, panel, manager):
             f"GitHub Copilot-ში შესვლა\n\n"
             f"1. გახსენით: {verification_uri}\n"
             f"2. შეიყვანეთ კოდი:  {user_code}\n"
-            f"3. დააჭირეთ Authorize-ს — კლიკი ავტომატურად შევა."
+            f"3. დააჭირეთ Authorize-ს — კლიპიტაური ავტომატურად შევა."
         )
         # Show in panel (cross-thread safe via Qt signal)
         panel.show_copilot_code(user_code, verification_uri)
@@ -138,7 +138,7 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Clicky")
-    app.setApplicationDisplayName("Clicky - AI Companion")
+    app.setApplicationDisplayName("კლიპიტაური")
 
     # ── Core components ───────────────────────────────────────────────────────
     manager = CompanionManager()
@@ -159,8 +159,16 @@ def main():
     # Response streaming
     manager.sig_response_chunk.connect(panel.append_response_chunk)
 
-    # Recognised speech → large on-screen caption, shown before the answer
+    # Recognised speech → large on-screen caption, shown before the answer,
+    # and the question line at the top of the panel
     manager.sig_transcript.connect(overlay.show_caption)
+    manager.sig_transcript.connect(panel.show_question)
+
+    # Panel input: the big button and typed questions
+    panel.on_ask_clicked.connect(manager.on_panel_ask)
+    panel.on_text_submitted.connect(manager.ask_text)
+    # The pointer is drawn above everything the app shows, panel included
+    panel.on_shown.connect(overlay.keep_on_top)
 
     # Audio level → cursor waveform (+ panel meter)
     manager.sig_audio_level.connect(panel.set_audio_level)
@@ -186,9 +194,10 @@ def main():
     _log_hint = Path(
         os.environ.get("LOCALAPPDATA", Path.home())
     ) / "Clicky" / "clicky.log"
+    manager.sig_error.connect(panel.show_error)
     manager.sig_error.connect(
         lambda e: tray.show_notification(
-            "კლიკი — შეცდომა", f"{e}\n\nდეტალები: {_log_hint}"
+            "კლიპიტაური — შეცდომა", f"{e}\n\nდეტალები: {_log_hint}"
         )
     )
 
@@ -199,7 +208,7 @@ def main():
         ok = manager.attach_document(path)
         tray.show_notification(
             "დოკუმენტი მიმაგრებულია" if ok else "მიმაგრება ვერ მოხერხდა",
-            f"{path}\nახლა შეგიძლიათ კლიკის ჰკითხოთ მის შესახებ." if ok else
+            f"{path}\nახლა შეგიძლიათ კლიპიტაურის ჰკითხოთ მის შესახებ." if ok else
             "ფაილის წაკითხვა ვერ მოხერხდა."
         )
     panel.on_document_dropped.connect(_on_doc_dropped)
@@ -249,7 +258,7 @@ def main():
         if summary:
             tray.show_notification(
                 "მოქმედებები ჩაწერილია",
-                "კლიკის გადაეცა. ჰკითხეთ: „რა გავაკეთე ახლა?“"
+                "კლიპიტაურის გადაეცა. ჰკითხეთ: „რა გავაკეთე ახლა?“"
             )
             # Stash as an attached doc so the next question sees it
             manager._attached_docs.append(("recorded_workflow.txt", summary))
@@ -281,14 +290,14 @@ def main():
     def _attach_doc():
         from PyQt6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            None, "დოკუმენტის მიმაგრება კლიკისთვის",
+            None, "დოკუმენტის მიმაგრება კლიპიტაურისთვის",
             "", "დოკუმენტები (*.pdf *.docx *.txt *.md *.csv)"
         )
         if path:
             ok = manager.attach_document(path)
             tray.show_notification(
                 "დოკუმენტი მიმაგრებულია",
-                f"{path}\nახლა შეგიძლიათ კლიკის ჰკითხოთ მის შესახებ." if ok else
+                f"{path}\nახლა შეგიძლიათ კლიპიტაურის ჰკითხოთ მის შესახებ." if ok else
                 "ფაილის წაკითხვა ვერ მოხერხდა."
             )
     tray.on_attach_doc.connect(_attach_doc)
@@ -297,7 +306,7 @@ def main():
         manager.set_active_provider(name)
         panel.refresh_for_provider(name)       # repopulate model dropdown + badge
         tray.rebuild_menu()                    # tick mark moves to new provider
-        tray.show_notification("კლიკი", f"გადართულია: {name}")
+        tray.show_notification("კლიპიტაური", f"გადართულია: {name}")
 
     tray.on_switch_provider.connect(_switch)
     tray.on_stop.connect(manager.stop)
@@ -366,7 +375,7 @@ def main():
             manager.set_active_provider(provider)
             panel.refresh_for_provider(provider)
             tray.rebuild_menu()
-            tray.show_notification("კლიკი", f"API გასაღებები შენახულია — გამოიყენება {provider}")
+            tray.show_notification("კლიპიტაური", f"API გასაღებები შენახულია — გამოიყენება {provider}")
 
         dlg.keys_saved.connect(_applied)
         dlg.show()
@@ -434,17 +443,19 @@ def main():
 
     # ── Show UI + start listener ──────────────────────────────────────────────
     overlay.show()        # persistent overlay (cursor follow)
-    # Panel is hidden by default — user can open it from the tray menu if needed
+    # Panel visible from the start: its button and text box are the easiest
+    # way in for users who don't know the hotkey or the wake word.
+    panel.show()
     manager.start()        # begin ambient mic + wake-word scanning
 
     providers = cfg.describe()
     _hk = "+".join(p.strip().capitalize() for p in cfg.hotkey.split("+"))
     tray.show_notification(
-        "კლიკი ჩართულია",
-        (f"თქვით „კლიკი“ ან დააჭირეთ {_hk}"
+        "კლიპიტაური ჩართულია",
+        (f"თქვით „კლიპიტაური“ ან დააჭირეთ {_hk}"
          if cfg.ambient_mic() else
          f"დააჭირეთ {_hk}, დასვით კითხვა — როცა გაჩერდებით, "
-         f"კლიკი გიპასუხებთ"),
+         f"კლიპიტაური გიპასუხებთ"),
     )
 
     # ── First-run setup wizard ────────────────────────────────────────────────

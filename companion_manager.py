@@ -220,7 +220,13 @@ def _speakable(text: str) -> str:
     return t
 
 
-POINT_RE = re.compile(r'\[POINT:(\d+),(\d+):([^:\]]+):screen(\d+)\]')
+# Tolerant on purpose: a tag the strict form missed ("500.5", a stray space,
+# no ":screen1") was still stripped from the text by ANY_TAG_RE, so the
+# pointer silently never moved.
+POINT_RE = re.compile(
+    r'\[POINT:\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*'
+    r'(?::([^:\]]*))?(?::\s*screen\s*(\d+))?\s*\]'
+)
 # A partial "[POINT..." prefix that hasn't closed yet — hold it back from display
 # until the next chunk so we never leak a half tag.
 POINT_PARTIAL_RE = re.compile(r'\[(?:P|PO|POI|POIN|POINT|POINT:[^\]]*)?$')
@@ -293,6 +299,7 @@ class CompanionManager(QObject):
         self._current_model: Optional[str] = None
         self._web_search_enabled = True
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_ready = threading.Event()
 
         # Providers (lazy)
         self._llm: Optional[BaseLLMProvider] = None
@@ -425,6 +432,7 @@ class CompanionManager(QObject):
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        self._loop.call_soon(self._loop_ready.set)
         self._loop.run_forever()
 
     # ── Sleep/wake watchdog ───────────────────────────────────────────────────
@@ -471,7 +479,13 @@ class CompanionManager(QObject):
             self._emit_state(AppState.IDLE)
 
     def _submit(self, coro):
-        if not self._loop:
+        # Work submitted in the first moments after startup used to be dropped
+        # silently; for a typed question that left the panel stuck on
+        # "thinking" forever. Wait briefly for the loop instead.
+        if not self._loop_ready.wait(timeout=5) or not self._loop:
+            coro.close()
+            _log.error("background loop not running — request dropped")
+            self._emit_state(AppState.IDLE)
             return
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -553,7 +567,10 @@ class CompanionManager(QObject):
     def _get_stt(self):
         if self._stt is None:
             provider = cfg.stt_provider()
-            if provider == "deepgram":
+            if provider == "google_web":
+                from audio.stt.google_web_stt import GoogleWebSTT
+                self._stt = GoogleWebSTT()
+            elif provider == "deepgram":
                 from audio.stt.deepgram_stt import DeepgramSTT
                 self._stt = DeepgramSTT()
             elif provider == "openai":
@@ -607,6 +624,30 @@ class CompanionManager(QObject):
             return
         if self._claim_end():
             self._submit(self._end_capture_and_process())
+
+    def on_panel_ask(self):
+        """The big panel button: start listening, or finish early, or stop."""
+        if self._state == AppState.IDLE:
+            self.on_hotkey_press()        # same as a tap: ends on silence
+        elif self._state == AppState.LISTENING:
+            if self._claim_end():         # "I'm done talking"
+                self._submit(self._end_capture_and_process())
+        else:
+            self.stop()                   # thinking/speaking: cut it short
+
+    def ask_text(self, text: str):
+        """A question typed into the panel — skips the microphone and STT."""
+        text = (text or "").strip()
+        if not text:
+            return
+        with self._begin_lock:
+            if self._state != AppState.IDLE:
+                return
+            self._state = AppState.THINKING
+        self._emit_state(AppState.THINKING)
+        # Typed text is never a mis-transcription, so short commands
+        # ("next", "repeat") are always allowed: audio length 0.
+        self._submit(self._answer(text, 0.0))
 
     def _handle_wake(self):
         """Triggered from ambient listener when wake-word is detected."""
@@ -667,12 +708,11 @@ class CompanionManager(QObject):
             return
         self._emit_state(AppState.LISTENING)
 
-    # End-of-speech tuning. SPEECH_RMS matches the ambient listener's VAD
-    # threshold so both agree on what counts as speech.
-    _SPEECH_RMS        = 0.006
-    _END_SILENCE_S     = 1.1    # quiet for this long after speaking = done
-    _NO_SPEECH_S       = 6.0    # nothing said at all = give up
-    _MAX_UTTERANCE_S   = 45.0   # hard cap so a stuck mic can't record forever
+    # End-of-speech tuning. What counts as speech comes from the listener's
+    # adaptive noise floor, so both agree and a noisy mic still detects the end.
+    _END_SILENCE_S     = 1.2    # quiet for this long after speaking = done
+    _NO_SPEECH_S       = 8.0    # nothing said at all = give up
+    _MAX_UTTERANCE_S   = 25.0   # hard cap so a stuck mic can't record forever
 
     async def _auto_stop_on_silence(self):
         """End the capture once the user actually stops talking.
@@ -690,7 +730,7 @@ class CompanionManager(QObject):
             await asyncio.sleep(0.05)
             now = time.monotonic()
 
-            if self._last_rms > self._SPEECH_RMS:
+            if self._last_rms > self._listener.speech_threshold:
                 speech_started = True
                 silence_from = None
             elif speech_started:
@@ -724,19 +764,35 @@ class CompanionManager(QObject):
         audio_seconds = len(pcm) / 32000.0
 
         self._emit_state(AppState.THINKING)
-        pointing_held = False  # track whether we told overlay to hold dwell
 
+        # 1. Transcribe — bounded so a hung/downloading STT model can never
+        # freeze the UI on "Thinking..." forever
         try:
-            # 1. Transcribe — bounded so a hung/downloading STT model can
-            # never freeze the UI on "Thinking..." forever
             transcript = await asyncio.wait_for(
                 self._get_stt().transcribe(pcm), timeout=90,
             )
-            _log.info("transcript: %r (provider=%s)",
-                      transcript[:120], cfg.llm_provider())
-            if not transcript.strip():
-                self._emit_state(AppState.IDLE)
-                return
+        except Exception as e:
+            _log.exception("transcription failed")
+            # TimeoutError has an empty message — never show a blank error.
+            self.sig_error.emit(
+                str(e) or "მეტყველების ამოცნობას ძალიან დიდი დრო დასჭირდა. სცადეთ თავიდან."
+            )
+            self._emit_state(AppState.IDLE)
+            return
+        _log.info("transcript: %r (stt=%s, provider=%s)",
+                  transcript[:120], cfg.stt_provider(), cfg.llm_provider())
+        await self._answer(transcript, audio_seconds)
+
+    async def _answer(self, transcript: str, audio_seconds: float):
+        """Answer one question — spoken (after STT) or typed in the panel."""
+        if not transcript.strip():
+            # Say so instead of silently going back to idle: an elderly user
+            # can't tell "didn't hear me" apart from "is broken".
+            await self._reply_local("ვერ გაგიგეთ. გთხოვთ, ცოტა უფრო ხმამაღლა გაიმეორეთ.")
+            return
+        pointing_held = False  # track whether we told overlay to hold dwell
+
+        try:
             # Show what was heard before anything is answered — including
             # voice commands, so a misheard one is visible too.
             self.sig_transcript.emit(transcript.strip())
@@ -1031,6 +1087,10 @@ class CompanionManager(QObject):
             if display_buf:
                 self.sig_response_chunk.emit(ANY_TAG_RE.sub("", display_buf))
 
+            # Tags only, so the log shows whether the AI tried to point.
+            tags = ANY_TAG_RE.findall(full_response)
+            _log.info("reply: %d chars, tags: %s", len(full_response), tags[:6] or "none")
+
             # 6. Update per-app history
             history.append(Message(role="user", content=transcript))
             history.append(Message(role="assistant", content=full_response))
@@ -1226,8 +1286,9 @@ class CompanionManager(QObject):
         tags are deferred and played back in sync with narration."""
         for match in POINT_RE.finditer(text):
             x, y, label, scr = match.groups()
-            lx, ly = self._denorm(float(x), float(y), int(scr))
-            self.sig_point_at.emit(lx, ly, label.strip())
+            lx, ly = self._denorm(float(x), float(y), int(scr or 1))
+            _log.info("pointing at %s,%s (%r) from the AI's tag", x, y, label)
+            self.sig_point_at.emit(lx, ly, (label or "").strip())
         if CLEAR_RE.search(text):
             self.sig_clear_drawings.emit()
 

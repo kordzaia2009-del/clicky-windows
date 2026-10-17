@@ -22,7 +22,7 @@ for _name in (".env", ".env.local"):
         load_dotenv(_p, override=True)
 
 
-DEFAULT_SYSTEM_PROMPT = """You are Clicky (in Georgian: კლიკი), a patient helper on a Windows
+DEFAULT_SYSTEM_PROMPT = """You are Klipitauri (in Georgian: კლიპიტაური), a patient helper on a Windows
 computer. The people you help are elderly Georgian speakers, often new to
 computers. You can see their screen and point at things on it.
 
@@ -139,6 +139,10 @@ def _ollama_model_env(*keys: str, default: str) -> str:
 class Config:
     # LLM
     anthropic_api_key: Optional[str] = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY") or None)
+    # Keys that are not scoped to a workspace are rejected with HTTP 400
+    # ("must include the anthropic-workspace-id header") unless the workspace
+    # is named on every request. Looks like wrkspc_01...
+    anthropic_workspace_id: Optional[str] = field(default_factory=lambda: os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip() or None)
     openai_api_key: Optional[str] = field(default_factory=lambda: os.getenv("OPENAI_API_KEY") or None)
     # Point the OpenAI provider at any OpenAI-compatible server (DeepSeek,
     # Alibaba DashScope/Qwen, SiliconFlow, OpenRouter...). Empty = real OpenAI.
@@ -305,6 +309,7 @@ class Config:
     # env var name → (dataclass attribute, human label)
     API_KEY_FIELDS = {
         "ANTHROPIC_API_KEY":  ("anthropic_api_key",  "Anthropic (Claude)"),
+        "ANTHROPIC_WORKSPACE_ID": ("anthropic_workspace_id", "Anthropic workspace"),
         "OPENAI_API_KEY":     ("openai_api_key",     "OpenAI (GPT)"),
         "GOOGLE_API_KEY":     ("google_api_key",     "Google (Gemini)"),
         "ELEVENLABS_API_KEY": ("elevenlabs_api_key", "ElevenLabs (voice)"),
@@ -316,6 +321,12 @@ class Config:
     def env_path() -> Path:
         """The .env Clicky reads and writes — next to Clicky.exe when frozen."""
         return _HERE / ".env"
+
+    def anthropic_headers(self) -> dict:
+        """Extra headers every Anthropic request needs (workspace routing)."""
+        if self.anthropic_workspace_id:
+            return {"anthropic-workspace-id": self.anthropic_workspace_id}
+        return {}
 
     def get_api_key(self, env_var: str) -> str:
         attr = self.API_KEY_FIELDS.get(env_var, (None, None))[0]
@@ -377,8 +388,11 @@ class Config:
     def stt_provider(self) -> str:
         # Allow explicit override via env (so users can force whisper_cpp etc.)
         forced = os.getenv("CLICKY_STT", "").strip().lower()
-        if forced in ("deepgram", "openai", "whisper_cpp", "faster_whisper"):
+        if forced in ("deepgram", "openai", "whisper_cpp", "faster_whisper", "google_web"):
             return forced
+        # Local Whisper cannot transcribe Georgian (see google_web_stt.py).
+        if self.whisper_language == "ka":
+            return "google_web"
         if self.deepgram_api_key:
             return "deepgram"
         if self.openai_api_key:
