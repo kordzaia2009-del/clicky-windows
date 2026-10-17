@@ -21,6 +21,7 @@ from config import cfg
 class FakePilot:
     instances = []
     is_task = True
+    cancel_while_planning = False
 
     def __init__(self, deps, cancel_event, settings=None):
         self.cancel_event = cancel_event
@@ -30,11 +31,15 @@ class FakePilot:
 
     async def plan_request(self, text):
         self.planned.append(text)
+        self.ran = False
+        if FakePilot.cancel_while_planning:
+            self.cancel_event.set()          # Esc / stop window during planning
         if not FakePilot.is_task:
             return PlanResult(is_task=False)
         return PlanResult(is_task=True, goals=[Goal("ა", [Step(1, "ა", "ბ")] * 3)])
 
     async def run_plan(self, plan):
+        self.ran = True
         while not self.release.is_set() and not self.cancel_event.is_set():
             await asyncio.sleep(0.01)
 
@@ -48,6 +53,7 @@ class FakeTTS:
 def mgr(monkeypatch):
     FakePilot.instances.clear()
     FakePilot.is_task = True
+    FakePilot.cancel_while_planning = False
     monkeypatch.setattr(ap_mod, "Autopilot", FakePilot)
     monkeypatch.setattr(cfg, "agent_mode", "do")
     agent_executor.reset_cancel()
@@ -136,3 +142,70 @@ def test_stop_cancels_a_running_autopilot(mgr):
     assert call(mgr, "გაჩერდი") is True
     assert agent_executor.cancel_event.is_set()
     assert wait_until(lambda: mgr._agent is None)
+
+
+# ── running flag + stopping (P1) ─────────────────────────────────────────────
+
+from PyQt6.QtCore import Qt as _Qt
+
+
+def _record_running(m):
+    seen = []
+    # Direct: the signal is emitted on the manager's worker thread and pytest
+    # runs no Qt event loop to deliver queued calls.
+    m.sig_agent_running.connect(seen.append, _Qt.ConnectionType.DirectConnection)
+    return seen
+
+
+def test_running_flag_covers_the_whole_run(mgr):
+    seen = _record_running(mgr)
+    assert mgr.agent_running is False
+    assert call(mgr, "გახსენი მეილი") is True
+    assert wait_until(lambda: mgr._agent is not None)
+    assert mgr.agent_running is True and seen == [True]
+    # waiting for a reply: the manager itself is IDLE, the flag stays on
+    asyncio.run_coroutine_threadsafe(mgr._agent_ask("confirm", "გავაგრძელო?"), mgr._loop)
+    assert wait_until(lambda: mgr._agent_wait is not None)
+    assert mgr._state == cm.AppState.IDLE and mgr.agent_running is True
+    FakePilot.instances[0].release.set()
+    mgr.agent_reply("no")
+    assert wait_until(lambda: not mgr.agent_running)
+    assert seen == [True, False]
+
+
+def test_panel_button_stops_a_run_instead_of_listening(mgr):
+    started = []
+    mgr.on_hotkey_press = lambda: started.append(1)
+    assert call(mgr, "გახსენი მეილი") is True
+    assert wait_until(lambda: mgr._agent is not None)
+    assert mgr._state == cm.AppState.IDLE
+    mgr.on_panel_ask()                                   # the big button
+    assert started == []                                 # did not open the mic
+    assert agent_executor.cancel_event.is_set()
+    assert wait_until(lambda: not mgr.agent_running)
+
+
+def test_stop_window_cancel_path(mgr):
+    assert call(mgr, "გახსენი მეილი") is True
+    assert wait_until(lambda: mgr._agent is not None)
+    mgr.cancel_agent()                                   # StopWindow.on_stop
+    assert agent_executor.cancel_event.is_set()
+    assert wait_until(lambda: not mgr.agent_running)
+    assert mgr._agent_lock.acquire(blocking=False)       # free for the next task
+    mgr._agent_lock.release()
+
+
+def test_cancel_while_planning_never_starts_the_run(mgr):
+    FakePilot.cancel_while_planning = True
+    seen = _record_running(mgr)
+    assert call(mgr, "გახსენი მეილი") is True           # handled: it was a task
+    pilot = FakePilot.instances[0]
+    assert pilot.ran is False and mgr._agent is None
+    assert mgr.agent_running is False and seen == []
+    assert mgr._agent_lock.acquire(blocking=False)
+    mgr._agent_lock.release()
+
+
+def test_cancel_agent_is_a_no_op_when_idle(mgr):
+    mgr.cancel_agent()
+    assert not agent_executor.cancel_event.is_set()

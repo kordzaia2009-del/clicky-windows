@@ -245,6 +245,8 @@ class CompanionManager(QObject):
     sig_agent_say           = pyqtSignal(str)             # what the autopilot says
     sig_agent_confirm_request = pyqtSignal(str, str)      # kind: confirm|private|"" (hide), question
     sig_agent_state         = pyqtSignal(str, str)        # state, detail
+    sig_agent_running       = pyqtSignal(bool)            # a run started / ended
+    sig_agent_target        = pyqtSignal(float, float)    # logical px the next action aims at
     sig_copilot_models_done = pyqtSignal(int)             # arg = model count
     sig_models_refreshed    = pyqtSignal(str, int)        # (provider, count)
     sig_ollama_models       = pyqtSignal(dict)            # {"vision": [...], "text": [...]}
@@ -316,6 +318,10 @@ class CompanionManager(QObject):
         self._agent = None
         self._agent_wait = None          # (kind, asyncio.Future)
         self._agent_speech = None        # tail of the queued autopilot speech
+        # True from the moment a "do" request starts planning until its run
+        # ends — including confirm/private waits, when the manager itself is
+        # IDLE. Stopping keys off this, not off AppState.
+        self._agent_active = False
         # Figures detected on screen this turn (normalized vertices) — used
         # for prompt injection and for snapping sloppy stroke endpoints.
         self._figures_ctx: list = []
@@ -581,6 +587,11 @@ class CompanionManager(QObject):
 
     def on_panel_ask(self):
         """The big panel button: start listening, or finish early, or stop."""
+        if self._agent_active:
+            # While the autopilot runs the manager is usually IDLE, but this
+            # button means "stop", never "listen".
+            self.cancel_agent()
+            return
         if self._state == AppState.IDLE:
             self.on_hotkey_press()        # same as a tap: ends on silence
         elif self._state == AppState.LISTENING:
@@ -1215,6 +1226,7 @@ class CompanionManager(QObject):
         if not self._agent_lock.acquire(blocking=False):  # single flight
             await self._reply_local("ერთი წუთით — ჯერ წინა დავალებას ვასრულებ.")
             return True
+        self._agent_active = True
         try:
             pilot = Autopilot(
                 self._agent_deps(), agent_executor.cancel_event,
@@ -1224,23 +1236,49 @@ class CompanionManager(QObject):
             plan = await pilot.plan_request(transcript)
         except Exception:
             _log.exception("autopilot planning failed")
-            self._agent_lock.release()
+            self._agent_finished()
             return False
         if not plan.is_task:
-            self._agent_lock.release()
+            self._agent_finished()
             return False                                  # old flow answers it
+        if agent_executor.cancel_event.is_set():          # stopped while planning
+            self._agent_finished()
+            self._agent_say("კარგი, გავჩერდი.")
+            return True
         self._agent = pilot
+        self.sig_agent_running.emit(True)
         asyncio.ensure_future(self._agent_run(pilot, plan))
         return True
+
+    def _agent_finished(self):
+        """Release the single-flight lock and clear the running flag."""
+        was_running = self._agent is not None
+        self._agent = None
+        self._agent_wait = None
+        self._agent_active = False
+        if was_running:
+            self.sig_agent_confirm_request.emit("", "")
+            self.sig_agent_running.emit(False)
+        self._agent_lock.release()
+
+    @property
+    def agent_running(self) -> bool:
+        return self._agent_active
+
+    def cancel_agent(self):
+        """Stop the autopilot (panel button, stop window). Thread-safe:
+        only sets the shared event; the run notices and winds down."""
+        if not self._agent_active:
+            return
+        from agent.executor import cancel_event
+        cancel_event.set()
+        self._cancel_flag = True       # also cuts a planning call's stream short
 
     async def _agent_run(self, pilot, plan):
         try:
             await pilot.run_plan(plan)
         finally:
-            self._agent = None
-            self._agent_wait = None
-            self.sig_agent_confirm_request.emit("", "")
-            self._agent_lock.release()
+            self._agent_finished()
 
     def _agent_deps(self):
         from agent import executor as agent_executor
@@ -1248,7 +1286,10 @@ class CompanionManager(QObject):
         from agent.planner import plan as planner_plan
 
         callbacks = agent_executor.ExecutorCallbacks(
-            point_at=self.sig_point_at.emit,
+            # The stop window moves out of the way of the target before the
+            # click (the executor holds ~400 ms after this).
+            point_at=lambda x, y, label: (self.sig_agent_target.emit(x, y),
+                                          self.sig_point_at.emit(x, y, label)),
             point_hold=self.sig_point_hold.emit,
             point_release=self.sig_point_release.emit,
             flight_scale=1.7 if self._slow_mode else 1.0,
@@ -2040,7 +2081,7 @@ class CompanionManager(QObject):
     def stop(self):
         """Cancel the current LLM stream + any in-flight TTS. Bound to Esc."""
         self._cancel_flag = True
-        if self._agent is not None:
+        if self._agent_active:
             from agent.executor import cancel_event
             cancel_event.set()
         # Kill audio playback immediately — flips the global stop event so

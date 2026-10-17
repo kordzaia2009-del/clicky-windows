@@ -144,6 +144,11 @@ def main():
     manager = CompanionManager()
     panel   = CompanionPanel()
     overlay = CursorOverlay()
+    # Shown only while the autopilot runs; keeps clear of the panel.
+    from ui.stop_window import StopWindow
+    stop_window = StopWindow(
+        avoid_rects=lambda: [panel.frameGeometry()] if panel.isVisible() else []
+    )
     tray    = TrayManager()
 
     # ── Wire signals ──────────────────────────────────────────────────────────
@@ -237,6 +242,12 @@ def main():
     manager.sig_agent_confirm_request.connect(panel.show_agent_prompt)
     manager.sig_agent_state.connect(panel.set_agent_state)
     panel.on_agent_reply.connect(manager.agent_reply)
+    # Stopping a run: the panel button turns into a stop button and the
+    # separate stop window appears for as long as the autopilot runs.
+    manager.sig_agent_running.connect(panel.set_agent_running)
+    manager.sig_agent_running.connect(stop_window.set_running)
+    manager.sig_agent_target.connect(stop_window.avoid_target)
+    stop_window.on_stop.connect(manager.cancel_agent)
 
     # Lesson recording
     def _record_start():

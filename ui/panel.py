@@ -17,6 +17,7 @@ from ui.design import (
     SURFACE, TEXT_SECONDARY, BORDER, ANIM_FAST_MS
 )
 from config import cfg
+from ui import strings_ka
 
 
 class AppState(Enum):
@@ -210,6 +211,7 @@ class CompanionPanel(QWidget):
     def __init__(self):
         super().__init__()
         self._state = AppState.IDLE
+        self._agent_running = False
         self._response_text = ""
         self._ollama_installed: dict[str, list[str]] = {"vision": [], "text": []}
         self._ollama_pick: Optional[str] = None
@@ -512,7 +514,7 @@ class CompanionPanel(QWidget):
             f"color: rgb({color.red()},{color.green()},{color.blue()}); font-size: 10px;"
         )
         self._status_label.setText(STATE_LABELS[state])
-        self._ptt_btn.setText(BUTTON_LABELS[state])
+        self._update_ptt_label()
         self._waveform.setVisible(state == AppState.LISTENING)
         if state == AppState.LISTENING:
             self._waveform.start()
@@ -563,6 +565,16 @@ class CompanionPanel(QWidget):
             self.show()
 
     # ── Autopilot ─────────────────────────────────────────────────────────────
+
+    def set_agent_running(self, running: bool):
+        """While the autopilot runs the big button is a stop button, even
+        when the app itself is idle (waiting for დიახ / მზად ვარ)."""
+        self._agent_running = bool(running)
+        self._update_ptt_label()
+
+    def _update_ptt_label(self):
+        self._ptt_btn.setText(strings_ka.AGENT_STOP_BUTTON if self._agent_running
+                              else BUTTON_LABELS[self._state])
     # Connected to CompanionManager signals emitted from its worker thread;
     # Qt queues those onto the GUI thread.
 
