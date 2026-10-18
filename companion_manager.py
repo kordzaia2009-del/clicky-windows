@@ -22,7 +22,7 @@ from config import cfg
 from ai.base_provider import BaseLLMProvider, Message
 from ai.provider_factory import create_llm_provider, ensure_ollama_running
 from audio.ambient_listener import AmbientListener
-from screen.capture import capture_all_screens
+from screen.capture import capture_all_screens, capture_thumb
 from ui.panel import AppState
 from tutor import (
     active_window_title, app_key,
@@ -378,6 +378,34 @@ class CompanionManager(QObject):
         # On startup, refresh any stale model cache in the background.
         # 30-day TTL means this is a once-a-month no-op for most launches.
         self._submit(self._refresh_stale_models())
+        self._submit(self._warm_up())
+
+    async def _warm_up(self):
+        """Load the slow modules in the background before the first question.
+        Measured: `import anthropic` alone takes 4-6 s on a warm machine, and
+        the first question after a start waited 5-23 s for it before the
+        planner's model call could even begin. Imports only: nothing is
+        started, nothing is sent."""
+        def _imports():
+            import importlib
+            names = ["agent.planner", "agent.autopilot", "agent.executor",
+                     "agent.typing_backends", "ai.pwa_locator", "pywinauto"]
+            provider_module = {"claude": "ai.claude_provider",
+                               "openai": "ai.openai_provider",
+                               "gemini": "ai.gemini_provider"}.get(cfg.llm_provider())
+            if provider_module:
+                names.insert(0, provider_module)
+            for name in names:
+                try:
+                    importlib.import_module(name)
+                except Exception:
+                    _log.debug("warm-up import %s failed", name, exc_info=True)
+        from timing import timed
+        with timed("startup.warm_up"):
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, _imports)
+            except Exception:
+                _log.debug("warm-up failed", exc_info=True)
 
     async def _refresh_stale_models(self):
         try:
@@ -1269,10 +1297,12 @@ class CompanionManager(QObject):
         self._agent = None
         self._agent_wait = None
         self._agent_active = False
+        # Release before the signals: a question arriving while they are being
+        # delivered must not be told "still busy" by a run that has ended.
+        self._agent_lock.release()
         if was_running:
             self.sig_agent_confirm_request.emit("", "")
             self.sig_agent_running.emit(False)
-        self._agent_lock.release()
 
     @property
     def agent_running(self) -> bool:
@@ -1305,7 +1335,7 @@ class CompanionManager(QObject):
                                           self.sig_point_at.emit(x, y, label)),
             point_hold=self.sig_point_hold.emit,
             point_release=self.sig_point_release.emit,
-            flight_scale=1.7 if self._slow_mode else 1.0,
+            flight_scale=(1.7 if self._slow_mode else 1.0) * agent_executor.AGENT_FLIGHT_SCALE,
         )
 
         async def plan(text, shot):
@@ -1333,6 +1363,7 @@ class CompanionManager(QObject):
 
         return AutopilotDeps(
             plan=plan, decide=decide, capture=capture_all_screens,
+            sample=capture_thumb,
             locate=self._agent_locate, execute=execute,
             say=self._agent_say, ask=self._agent_ask,
             on_state=lambda s, d: self.sig_agent_state.emit(s, d),

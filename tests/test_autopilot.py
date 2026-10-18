@@ -346,3 +346,43 @@ def test_on_action_announces_each_action_before_it_runs_without_typed_text():
     first = env.events.index(("announce",))
     assert env.events[first + 1][0] == "execute"             # announced, then executed
     assert all("საიდუმლო" not in str(s) for s in seen)
+
+
+# ── cheap settle samples (screen.capture.Thumb) ───────────────────────────────
+
+def _fake_screen(seed=0, w=2560, h=1440):
+    import random
+    from PIL import Image, ImageDraw
+    rnd = random.Random(seed)
+    img = Image.new("RGB", (w, h), (235, 238, 242))
+    d = ImageDraw.Draw(img)
+    for _ in range(60):                      # windows, buttons, text-ish bars
+        x, y = rnd.randrange(w - 200), rnd.randrange(h - 60)
+        d.rectangle([x, y, x + rnd.randrange(40, 600), y + rnd.randrange(8, 300)],
+                    fill=tuple(rnd.randrange(256) for _ in range(3)))
+    return img
+
+
+def _as_screenshot(img):
+    import base64, io
+    from types import SimpleNamespace
+    from PIL import Image
+    small = img.resize((1280, int(img.height * 1280 / img.width)), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    small.save(buf, format="JPEG", quality=75, optimize=True)
+    return SimpleNamespace(base64_jpeg=base64.b64encode(buf.getvalue()).decode(),
+                           physical_width=img.width, physical_height=img.height)
+
+
+def test_thumb_and_screenshot_of_the_same_screen_count_as_settled():
+    from screen.capture import thumb_from_image
+    s = ap.Settings()
+    img = _fake_screen()
+    assert ap.image_diff(_as_screenshot(img), thumb_from_image(img)) < s.stable_eps
+    assert ap.image_diff(thumb_from_image(img), thumb_from_image(img)) == 0.0
+
+
+def test_thumb_sees_a_real_change():
+    from screen.capture import thumb_from_image
+    a, b = _fake_screen(1), _fake_screen(2)
+    assert ap.image_diff(_as_screenshot(a), thumb_from_image(b)) > ap.Settings().change_eps

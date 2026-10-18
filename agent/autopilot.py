@@ -191,6 +191,9 @@ def image_diff(a, b) -> float:
     from PIL import Image, ImageChops, ImageStat
 
     def thumb(s):
+        gray = getattr(s, "gray", None)          # screen.capture.Thumb
+        if gray is not None:
+            return gray if gray.size == (96, 54) else gray.resize((96, 54))
         img = Image.open(io.BytesIO(base64.b64decode(s.base64_jpeg)))
         return img.convert("L").resize((96, 54))
 
@@ -231,6 +234,9 @@ class AutopilotDeps:
     image_diff: Callable[[Any, Any], float] = image_diff
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     run_blocking: Optional[Callable] = None     # default: asyncio.to_thread
+    # cheap "has the screen changed?" sample for the settle wait; None = use
+    # full screenshots (capture) there as well
+    sample: Optional[Callable[[], Any]] = None
 
 
 @dataclass
@@ -580,7 +586,7 @@ class Autopilot:
         while time.monotonic() < deadline:
             self._check_cancel()
             await self.d.sleep(self.s.settle_interval_s)
-            cur = await self._screen()
+            cur = await (self._blocking(self.d.sample) if self.d.sample else self._screen())
             samples += 1
             if cur is None:
                 break

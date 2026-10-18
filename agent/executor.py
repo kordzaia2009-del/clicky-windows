@@ -64,6 +64,10 @@ cancel_event = threading.Event()      # set by StopHotkey (Esc)
 DRY_RUN = os.getenv("CLICKY_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 HOLD_S = 0.4              # pointer rests on the target this long before acting
+# While the autopilot runs, the pointer flies this much faster than the
+# teacher-pace flights of normal answers (the 400 ms hold is unchanged).
+# Measured: flights were 2.2-2.8 s of every click.
+AGENT_FLIGHT_SCALE = 0.5
 POLL_S = 0.05
 PAUSE_MOVE_PX = 8         # physical mouse movement that counts as the user
 RESUME_STILL_S = 1.5      # mouse must be still this long to resume

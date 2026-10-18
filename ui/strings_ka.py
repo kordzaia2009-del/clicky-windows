@@ -46,3 +46,13 @@ ISLAND_WAIT = "ველოდები…"
 ISLAND_POINT = "კურსორი მიდის: {label}"
 ISLAND_POINT_NO_LABEL = "კურსორი მიდის…"
 ISLAND_CLOSE_TIP = "გაჩერება"
+
+# Startup settings window (shown every time the app starts)
+STARTUP_TITLE = "კლიპიტაურის პარამეტრები"
+STARTUP_MODEL_LABEL = "მოდელი"
+STARTUP_MODEL_DEFAULT = "ნაგულისხმევი"
+STARTUP_MODEL_HINT = "Haiku — ყველაზე სწრაფი და იაფი · Sonnet — სწრაფი და ზუსტი · Opus — ყველაზე ზუსტი, ნელი"
+STARTUP_API_KEYS = "API გასაღები…"
+STARTUP_SHOW_PANEL = "ჩატის პანელის ჩვენება"
+STARTUP_SHOW_CAPTION = "ჩემი ნათქვამის ჩვენება ლურჯ ჩარჩოში"
+STARTUP_START = "დაწყება"

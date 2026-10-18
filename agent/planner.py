@@ -38,7 +38,11 @@ if TYPE_CHECKING:   # screen.capture pulls in mss/PIL; only needed for typing
 
 log = logging.getLogger("clicky.planner")
 
-MIN_STEPS, MAX_STEPS = 3, 6
+# Every step costs at least one model call (the autopilot asks "is it done?"
+# per step), so a simple task should not be padded out to three steps.
+# Measured: 15 of 49 decision calls only confirmed a step was already done,
+# and a valid 2-step plan was rejected and re-planned (+3.5 s).
+MIN_STEPS, MAX_STEPS = 1, 6
 
 _GEORGIAN_RE = re.compile(r"[Ⴀ-ჿᲐ-Ჿⴀ-⴯]")
 # Steps describe what to do, never where on screen: no "(840, 610)",
@@ -98,7 +102,10 @@ RULES
    anything that only needs an answer. When false, "goals" is [].
 2. One goal per distinct thing the user asked for, in the order they said
    it. "Open my mail and the first letter" is two goals.
-3. Each goal has 3 to 6 high-level steps, numbered from 1 within the goal.
+3. Each goal has 1 to 6 high-level steps, numbered from 1 within the goal:
+   as FEW as the goal really needs. Do not add steps that only wait or only
+   check — every step costs the person time. Opening an app from the taskbar
+   is often a single step.
    A step says WHAT the person does, in plain words — never coordinates,
    pixel positions, screen measurements or numbers describing a location.
 4. "goal", "title" and "done_when" are written in Georgian, in simple
@@ -120,8 +127,7 @@ User: ჩართე იუთუბი და მოძებნე ქარ�
 {"is_task": true, "goals": [
  {"goal": "YouTube-ის გახსნა", "steps": [
   {"id": 1, "title": "გახსენით ბრაუზერი", "done_when": "ბრაუზერის ფანჯარა გახსნილია", "private": false},
-  {"id": 2, "title": "გადადით YouTube-ის საიტზე", "done_when": "ეკრანზე ჩანს YouTube-ის გვერდი", "private": false},
-  {"id": 3, "title": "დაელოდეთ გვერდის ჩატვირთვას", "done_when": "გვერდი სრულად ჩაიტვირთა", "private": false}]},
+  {"id": 2, "title": "გადადით YouTube-ის საიტზე", "done_when": "ეკრანზე ჩანს YouTube-ის გვერდი", "private": false}]},
  {"goal": "ქართული სიმღერების მოძებნა", "steps": [
   {"id": 1, "title": "დააჭირეთ ძებნის ველს", "done_when": "ძებნის ველში ციმციმებს კურსორი", "private": false},
   {"id": 2, "title": "ჩაწერეთ: ქართული სიმღერები", "done_when": "ტექსტი ჩაწერილია ძებნის ველში", "private": false},

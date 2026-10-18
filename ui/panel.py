@@ -561,6 +561,28 @@ class CompanionPanel(QWidget):
                 self._ollama_polled_at = now
                 self.on_ollama_refresh_requested.emit()
 
+    def model_choices(self):
+        """The models this dropdown offers, as (id, label) pairs."""
+        return [(self._model_combo.itemData(i) or self._model_combo.itemText(i),
+                 self._model_combo.itemText(i))
+                for i in range(self._model_combo.count())]
+
+    def current_model(self):
+        return self._model_combo.currentData() or self._model_combo.currentText() or None
+
+    def select_model(self, model_id: str) -> bool:
+        """Pick `model_id` here (as if chosen in the dropdown) — the manager
+        follows through on_model_changed. False if it is not in the list."""
+        idx = self._model_combo.findData(model_id)
+        if idx < 0:
+            return False
+        if idx == self._model_combo.currentIndex():
+            self.on_model_changed.emit(model_id)      # make sure the manager has it
+        else:
+            self._model_combo.setCurrentIndex(idx)   # emits on_model_changed
+        self._remember_ollama_pick()
+        return True
+
     def refresh_for_provider(self, provider: str):
         """Called from outside when the active provider is switched at runtime."""
         self._badge.set_provider(provider)

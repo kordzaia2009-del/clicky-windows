@@ -119,6 +119,59 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
     return results
 
 
+# SetWindowDisplayAffinity: WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+) keeps a
+# window visible on screen but out of every screenshot. WDA_NONE undoes it.
+WDA_NONE = 0x0
+WDA_EXCLUDEFROMCAPTURE = 0x11
+
+
+def exclude_from_capture(hwnd: int, exclude: bool = True) -> bool:
+    """Keep one of the app's own windows (mascot, pointer, island, stop
+    window) out of screenshots, so the model sees only the real screen and the
+    autopilot's "has the screen settled?" check is not fooled by our own
+    animation. Returns False where Windows does not support it."""
+    try:
+        ok = ctypes.windll.user32.SetWindowDisplayAffinity(
+            int(hwnd), WDA_EXCLUDEFROMCAPTURE if exclude else WDA_NONE)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+@dataclass
+class Thumb:
+    """A tiny greyscale sample of one monitor — enough for "did the screen
+    change?" and much cheaper than a full ScreenShot (no JPEG, no base64)."""
+    index: int
+    physical_width: int
+    physical_height: int
+    gray: "Image.Image"
+
+
+THUMB_SIZE = (96, 54)
+
+
+def capture_thumb(index: int = 1) -> "Thumb | None":
+    """Sample monitor `index` (1 = the first real monitor, as in
+    capture_all_screens()[0])."""
+    with mss.mss() as sct:
+        mons = sct.monitors
+        if index >= len(mons):
+            return None
+        raw = sct.grab(mons[index])
+    return thumb_from_image(Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX"), index)
+
+
+def thumb_from_image(img: "Image.Image", index: int = 1, max_width: int = 1280) -> Thumb:
+    """Same scaling as capture_all_screens() minus the JPEG, so a Thumb and a
+    ScreenShot of the same screen compare as (almost) equal."""
+    phys_w, phys_h = img.width, img.height
+    if img.width > max_width:
+        img = img.resize((max_width, int(img.height * max_width / img.width)),
+                         Image.Resampling.LANCZOS)
+    return Thumb(index, phys_w, phys_h, img.convert("L").resize(THUMB_SIZE))
+
+
 def capture_primary() -> ScreenShot:
     """Capture only the primary monitor."""
     screens = capture_all_screens()

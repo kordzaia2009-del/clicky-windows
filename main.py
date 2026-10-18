@@ -3,6 +3,7 @@ Clicky for Windows — Entry Point.
 Boots Qt, spawns overlay+panel+tray, starts ambient mic listener, binds hotkey.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -176,7 +177,14 @@ def main():
 
     # Recognised speech → large on-screen caption, shown before the answer,
     # and the question line at the top of the panel
-    manager.sig_transcript.connect(overlay.show_caption)
+    # The blue „თქვენ თქვით:“ box can be switched off in the startup settings.
+    _ui_prefs = {"said_caption": True}
+    _startup = {"dlg": None}        # the startup settings window, while open
+
+    def _on_transcript(text: str):
+        if _ui_prefs["said_caption"]:
+            overlay.show_caption(text)
+    manager.sig_transcript.connect(_on_transcript)
     manager.sig_transcript.connect(panel.show_question)
 
     # Panel input: the big button and typed questions
@@ -256,6 +264,7 @@ def main():
     # separate stop window appears for as long as the autopilot runs.
     manager.sig_agent_running.connect(panel.set_agent_running)
     manager.sig_agent_running.connect(stop_window.set_running)
+    manager.sig_agent_running.connect(overlay.set_agent_running)
     # Before each action: the panel docks opposite the target first (keeping
     # the stop window uncovered), then the stop window gets out of the way.
     panel.set_keep_clear_provider(
@@ -286,6 +295,24 @@ def main():
     manager.sig_point_at.connect(island_ctl.on_point)
     manager.sig_audio_level.connect(island_ctl.on_level)
     island.on_close.connect(manager.dismiss_from_island)
+
+    # Our own windows stay out of screenshots (the model and the autopilot's
+    # settle check see the real screen), except while a lesson is recorded,
+    # where the pointer must be in the video. CLICKY_HIDE_OVERLAY_FROM_CAPTURE=0
+    # turns this off.
+    from screen.capture import exclude_from_capture
+    _hide_own = os.getenv("CLICKY_HIDE_OVERLAY_FROM_CAPTURE", "1").strip().lower()         not in ("0", "false", "no")
+
+    def _set_own_capture(recording: bool):
+        if not _hide_own:
+            return
+        for w in (overlay, island, stop_window):
+            try:
+                exclude_from_capture(int(w.winId()), not recording)
+            except Exception:
+                logging.getLogger("clicky").debug("capture exclusion failed", exc_info=True)
+    _set_own_capture(False)
+    manager.sig_recording_state.connect(lambda on, _path: _set_own_capture(bool(on)))
 
     # Lesson recording
     def _record_start():
@@ -435,6 +462,8 @@ def main():
             manager.set_active_provider(provider)
             panel.refresh_for_provider(provider)
             tray.rebuild_menu()
+            if _startup["dlg"] is not None:          # keep its model list in step
+                _startup["dlg"].set_models(panel.model_choices(), panel.current_model())
             tray.show_notification("კლიპიტაური", f"API გასაღებები შენახულია — გამოიყენება {provider}")
 
         dlg.keys_saved.connect(_applied)
@@ -510,6 +539,41 @@ def main():
     # bubble and the island shows what is happening. Tray -> „პანელის
     # ჩვენება“ still opens the panel.
     manager.start()        # begin ambient mic + wake-word scanning
+
+    # ── Startup settings: model / API key, chat panel, the blue box ─────────
+    # Last time's choices apply at once; the window opens on every start so
+    # they can be changed before the first question.
+    from ui import startup_settings as startup
+
+    def _apply_startup(s, save: bool = True):
+        _ui_prefs["said_caption"] = s.show_said_caption
+        if s.model and not panel.select_model(s.model):
+            logging.getLogger("clicky").info("startup: model %r is not offered now", s.model)
+        # On: the panel is shown and comes back with each question.
+        panel.auto_show = s.show_chat_panel
+        if s.show_chat_panel:
+            panel.show()
+        else:
+            panel.hide()
+        if save:
+            startup.save_settings(s)
+
+    def _startup_closed(s):
+        _startup["dlg"] = None
+        _apply_startup(s)
+
+    _saved = startup.load_settings()
+    _apply_startup(_saved, save=False)
+    if startup.enabled():
+        _dlg = startup.StartupSettingsDialog(
+            _saved, panel.model_choices() or startup.model_choices(cfg.llm_provider()),
+            provider=cfg.llm_provider())
+        _dlg.applied.connect(_startup_closed)
+        _dlg.api_keys_requested.connect(_open_api_keys)
+        _startup["dlg"] = _dlg
+        _dlg.show()
+        _dlg.raise_()
+        _dlg.activateWindow()
 
     providers = cfg.describe()
     _hk = "+".join(p.strip().capitalize() for p in cfg.hotkey.split("+"))

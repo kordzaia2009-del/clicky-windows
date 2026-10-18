@@ -183,6 +183,9 @@ AGENT_CAPTION_CHARS_PER_S = 12.0   # ...plus reading time for elderly users
 GRAPE_RADIUS = 22              # logical px, frosted circle around the grapes
 TRAIL_SECONDS = 0.45           # how much of the flight path stays visible
 TRAIL_GOLD = (244, 192, 92)
+# The taskbar arrow and the ring round a target use the same orange as the
+# pointer's glow while it answers (they used to be Clicky blue).
+POINT_ACCENT = QColor(*TRAIL_GOLD)
 MASCOT_SIZE = 150              # logical px
 MASCOT_MARGIN = 18
 MASCOT_ENABLED = os.getenv("CLICKY_MASCOT", "1").strip() not in ("0", "false", "no")
@@ -289,6 +292,8 @@ class CursorOverlay(QWidget):
 
         # Slow mode — doubles flight + dwell so Clicky feels more like a teacher
         self._slow_mode: bool = False
+        self._agent_pace: float = 1.0      # < 1 while the autopilot runs
+        self._last_still_sig = None        # last idle frame painted (see _tick)
 
         # Optional highlight ring around detected element (x, y, radius)
         self._ring: Optional[tuple] = None
@@ -489,6 +494,11 @@ class CursorOverlay(QWidget):
         """Doubles flight + dwell duration so students can track the motion."""
         self._slow_mode = enabled
 
+    def set_agent_running(self, running: bool):
+        """Autopilot flights are quicker; the executor waits the same scale."""
+        from agent.executor import AGENT_FLIGHT_SCALE
+        self._agent_pace = AGENT_FLIGHT_SCALE if running else 1.0
+
     def set_point_hold(self, hold: bool):
         """Called by manager when TTS starts (True) / ends (False).
         While held, dwell never auto-expires — the buddy stays on the element
@@ -576,7 +586,7 @@ class CursorOverlay(QWidget):
         dur = max(FLY_DURATION_MIN, min(FLY_DURATION_MAX, FLY_DURATION_MIN + dist / 700.0))
         if phase == _PHASE_RETURNING:
             dur = RETURN_DURATION
-        dur *= mult
+        dur *= mult * self._agent_pace
         # Arc up over the midpoint
         mid = QPointF((start.x() + end.x()) / 2, (start.y() + end.y()) / 2)
         arc_height = min(dist * 0.22, 90.0)
@@ -756,7 +766,25 @@ class CursorOverlay(QWidget):
         self._spin_phase += 0.14  # ~0.8s per rev @ 60fps matches Swift
         self._ring_phase += 0.08
 
+        # Low-end PCs: the overlay spans every monitor, so a repaint is costly.
+        # When nothing on it can change (pointer at rest, no caption, bubble,
+        # drawing or animation, same mascot frame), skip this frame.
+        sig = self._still_signature()
+        if sig is not None and sig == self._last_still_sig:
+            return
+        self._last_still_sig = sig
         self.update()
+
+    def _still_signature(self):
+        """What the idle overlay looks like, or None while anything animates."""
+        if (self._mode in (MODE_LISTENING, MODE_THINKING) or self._caption_text
+                or self._say_line or self._annotations or self._trail
+                or self._ring is not None or self._locked_pos is not None):
+            return None
+        if abs(self._vel.x()) > 0.05 or abs(self._vel.y()) > 0.05:
+            return None
+        return (round(self._display_pos.x()), round(self._display_pos.y()),
+                self._mascot_frame, self._mode)
 
     # ── Painting ──────────────────────────────────────────────────────────────
 
@@ -833,12 +861,12 @@ class CursorOverlay(QWidget):
         path.lineTo(right)
         path.closeSubpath()
         for col, width in ((QColor(255, 255, 255, int(230 * a)), 9),
-                           (QColor(CURSOR_BLUE.red(), CURSOR_BLUE.green(),
-                                   CURSOR_BLUE.blue(), int(255 * a)), 5)):
+                           (QColor(POINT_ACCENT.red(), POINT_ACCENT.green(),
+                                   POINT_ACCENT.blue(), int(255 * a)), 5)):
             p.setPen(QPen(col, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawLine(start, base)
         p.setPen(QPen(QColor(255, 255, 255, int(230 * a)), 3))
-        p.setBrush(QColor(CURSOR_BLUE.red(), CURSOR_BLUE.green(), CURSOR_BLUE.blue(), int(255 * a)))
+        p.setBrush(QColor(POINT_ACCENT.red(), POINT_ACCENT.green(), POINT_ACCENT.blue(), int(255 * a)))
         p.drawPath(path)
         p.setBrush(Qt.BrushStyle.NoBrush)
 
@@ -1057,21 +1085,21 @@ class CursorOverlay(QWidget):
         p.drawText(QPointF(x, y), text)
 
     def _draw_ring(self, p):
-        """Pulsing blue ring around the detected UI element."""
+        """Pulsing orange ring around the detected UI element."""
         rx, ry, base_r = self._ring
         rx -= self.x()
         ry -= self.y()
         pulse = (math.sin(self._ring_phase) + 1) / 2   # 0..1
         r = base_r + pulse * 6
         # Outer halo
-        glow = QColor(CURSOR_BLUE)
+        glow = QColor(POINT_ACCENT)
         glow.setAlpha(60)
         pen = QPen(glow, 4)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(QPointF(rx, ry), r + 3, r + 3)
         # Crisp inner ring
-        inner = QColor(CURSOR_BLUE)
+        inner = QColor(POINT_ACCENT)
         inner.setAlpha(190)
         pen = QPen(inner, 2)
         p.setPen(pen)
@@ -1164,8 +1192,6 @@ class CursorOverlay(QWidget):
         alpha = min(1.0, (now - self._say_t0) / SAY_FADE_IN_S)
         if now > self._say_hide_at:
             alpha *= max(0.0, 1.0 - (now - self._say_hide_at) / SAY_FADE_OUT_S)
-        if alpha <= 0.0:
-            return
 
         font = QFont()
         font.setFamilies(["Segoe UI", "Sylfaen"])
@@ -1187,7 +1213,11 @@ class CursorOverlay(QWidget):
         a = QApplication.primaryScreen().availableGeometry()
         (bx, by, bw, bh), (tx, ty) = bubble_geometry(
             (a.x(), a.y(), a.width(), a.height()), (m.x(), m.y(), m.width(), m.height()), size)
+        # Recorded even on a fully transparent frame (the first frame of the
+        # fade-in): the stop window and panel keep off this area from the start.
         self._say_rect = QRectF(bx, by, bw, bh)
+        if alpha <= 0.0:
+            return
         ox, oy = self.x(), self.y()
         rect = QRectF(bx - ox, by - oy, bw, bh)
         tip = QPointF(tx - ox, ty - oy)

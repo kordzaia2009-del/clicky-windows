@@ -74,7 +74,8 @@ Georgian, and the app looks at the screen and answers by voice. In **"do" mode**
 - `main`: upstream base.
 - `georgian-elderly-adaptation`: the Georgian UI, prompt, STT and TTS adaptation.
 - `autopilot` (8cc492b): planner, executor, state machine, safety, stop window, elderly-friendly panel and README. **Frozen for the demo.**
-- `autopilot-visuals` (**current**, 6df4417): adds the mascot, island, grape pointer, speech bubble, hidden panel, pyautogui/pywinauto backends and the `timing:` logs.
+- `autopilot-visuals`: adds the mascot, island, grape pointer, speech bubble, hidden panel, pyautogui/pywinauto backends, the `timing:` logs, and a pywinauto-only locator (the screenshot finders are commented out in `_agent_locate`).
+- `low-end-settings` (**current**, branched from `autopilot-visuals`): adds the orange taskbar arrow and ring, the speed fixes, the startup settings window and some bug fixes (see the section below).
 
 ## Current task / where we stopped
 The user said **"the autopilot is too slow — measure first, don't optimize yet."**
@@ -107,9 +108,18 @@ Done and pushed (commit 6df4417): `timing:` log lines for every phase.
   - `tts.playback`;
   - `tts.speak` (`start_speaking_ms` and total).
 
-**Next step:** the user runs a real task and pastes the `timing:` lines. Analyse where the time goes, rank the bottlenecks, and propose optimizations. Implement them only once the user approves. Likely suspects to check against the data:
-- the extra `plan_request` on every do-mode question;
-- slow model time to first token;
-- vision locator fallbacks (Computer Use / universal);
-- settle timeouts;
-- TTS synthesis before the voice starts.
+**Done on `low-end-settings`, based on 818 real `timing:` lines:**
+- **pywinauto lookups:** these sometimes hung for 72 s, 122 s and once 22 minutes. They now have a 3 s walk budget plus a 4 s watchdog thread (`ai/pwa_locator.py`).
+- **Own windows hidden from screenshots:** the overlay, island and stop window are now excluded (`WDA_EXCLUDEFROMCAPTURE`, in `screen/capture.exclude_from_capture`). They are still captured while a lesson is being recorded. Before this, the mascot's own animation kept the settle check from ever seeing a still screen, and 7 of 20 settles hit the 4 s timeout.
+- **Settle check:** it now uses cheap `capture_thumb()` samples instead of full JPEG screenshots.
+- **Pointer flight:** while the autopilot runs it is 2× faster (`AGENT_FLIGHT_SCALE`). The 400 ms hold is unchanged.
+- **First question after a start:** it used to wait 5–23 s because `import anthropic` takes 4–6 s. These imports now load in the background at startup (`_warm_up`).
+- **Planner:** it now allows 1–6 steps per goal instead of 3–6. Each step costs at least one model call.
+- **Overlay repaints:** frames are skipped while nothing on screen changes, to save CPU.
+- **Thinking:** left at effort `low`, which is already the lowest level. Time to first token is about 1.7 s for both plain answers and step decisions, which points to input processing, not thinking. Haiku 5.5 can be picked in the startup settings window if you want more speed.
+- **Startup settings window** (`ui/startup_settings.py`): opens on every start. It offers the model with an API-keys button, a chat panel on/off switch, and an on/off switch for the blue „თქვენ თქვით:“ box. Choices are saved to `%LOCALAPPDATA%\Clicky\startup_settings.json`. Set `CLICKY_STARTUP_SETTINGS=0` to skip the window.
+- **Bugs fixed:**
+  - the autopilot's lock was released after its UI signals were sent (a race);
+  - the speech bubble's screen area wasn't recorded on its first transparent frame.
+
+**Next step:** the user runs tasks on `low-end-settings` and compares the new `timing:` lines with the old ones. The remaining big costs are about 2.5 s per model call, the extra plan call on every do-mode question (11 of 20 questions weren't tasks), and the TTS start (about 2.5 s; Edge synthesises the whole line before playing).

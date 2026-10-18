@@ -137,8 +137,8 @@ def _mutate(fn):
     (_mutate(lambda d: d.update(is_task="true")), "is_task"),
     (_mutate(lambda d: d.update(goals=[])), "non-empty list"),
     (_mutate(lambda d: d.pop("goals")), "non-empty list"),
-    (_mutate(lambda d: d["goals"][0]["steps"].pop()), "needs 3-6"),
-    (_mutate(lambda d: d["goals"][0]["steps"].extend([_step(i) for i in range(4, 8)])), "needs 3-6"),
+    (_mutate(lambda d: d["goals"][0]["steps"].clear()), "needs 1-6"),
+    (_mutate(lambda d: d["goals"][0]["steps"].extend([_step(i) for i in range(4, 8)])), "needs 1-6"),
     (_mutate(lambda d: d["goals"][0]["steps"][0].update(title="Open the browser")), "Georgian"),
     (_mutate(lambda d: d["goals"][0].update(goal="")), "non-empty string"),
     (_mutate(lambda d: d["goals"][0]["steps"][0].update(title="დააჭირეთ (840, 610)")), "coordinates"),
@@ -181,10 +181,10 @@ def test_plan_retries_once_with_the_error_then_succeeds():
 
 
 def test_plan_falls_back_after_two_bad_replies():
-    llm = FakeLLM("still not json", _mutate(lambda d: d["goals"][0]["steps"].pop()))
+    llm = FakeLLM("still not json", _mutate(lambda d: d["goals"][0]["steps"].clear()))
     result = run(plan("გახსენი მეილი", llm=llm))
     assert result.is_task is False and result.goals == []
-    assert "invalid plan after retry" in result.error and "needs 3-6" in result.error
+    assert "invalid plan after retry" in result.error and "needs 1-6" in result.error
     assert len(llm.calls) == 2
 
 
@@ -205,3 +205,10 @@ def test_plan_empty_request_makes_no_call():
     llm = FakeLLM()
     assert run(plan("   ", llm=llm)).is_task is False
     assert llm.calls == []
+
+
+def test_a_one_step_goal_is_accepted():
+    data = json.loads(_plan_json())
+    del data["goals"][0]["steps"][1:]
+    result = parse_plan(json.dumps(data, ensure_ascii=False))
+    assert result.is_task and len(result.goals[0].steps) == 1
