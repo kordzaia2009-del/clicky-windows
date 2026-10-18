@@ -278,3 +278,13 @@ def test_manager_locator_tries_pywinauto_first(monkeypatch):
     m = cm.CompanionManager.__new__(cm.CompanionManager)
     loc = cm.CompanionManager._agent_locate(m, "Send", None)
     assert loc.source == "pywinauto" and loc.element is control and (loc.px, loc.py) == (140, 215)
+
+
+def test_manager_locator_is_pywinauto_only(monkeypatch):
+    import companion_manager as cm
+    from ai import hybrid_pointer, pwa_locator
+    monkeypatch.setattr(pwa_locator, "find_control", lambda label: None)
+    monkeypatch.setattr(hybrid_pointer, "find_target",
+                        lambda *a, **k: pytest.fail("screenshot locator must not run"))
+    m = cm.CompanionManager.__new__(cm.CompanionManager)
+    assert cm.CompanionManager._agent_locate(m, "Send", object()) is None
