@@ -20,6 +20,7 @@ def fake(monkeypatch):
     w = FakeWin()
     monkeypatch.setattr(ex, "win", w)
     monkeypatch.setattr(ex, "HOLD_S", 0.0)
+    monkeypatch.setenv("CLICKY_TYPE_BACKEND", "sendinput")
     ex.reset_cancel()
     yield w
     ex.set_dry_run(False)

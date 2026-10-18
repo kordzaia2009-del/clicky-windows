@@ -146,8 +146,17 @@ def main():
     overlay = CursorOverlay()
     # Shown only while the autopilot runs; keeps clear of the panel.
     from ui.stop_window import StopWindow
+    # iPhone-style status island at the top (its × stops what is running)
+    from ui.island import IslandController, IslandWindow
+    island = IslandWindow()
+    island_ctl = IslandController(island)
+
+    def _island_rects():
+        return [island.frameGeometry()] if island.isVisible() else []
+
     stop_window = StopWindow(
-        avoid_rects=lambda: [panel.frameGeometry()] if panel.isVisible() else []
+        avoid_rects=lambda: ([panel.frameGeometry()] if panel.isVisible() else [])
+        + _island_rects() + overlay.occupied_rects()
     )
     tray    = TrayManager()
 
@@ -158,6 +167,7 @@ def main():
         panel.set_state(state)
         tray.set_state_icon(state.name.lower())
         overlay.set_mode(STATE_TO_CURSOR_MODE.get(state, MODE_IDLE))
+        island_ctl.on_app_state(state)
 
     manager.sig_state_changed.connect(_on_state)
 
@@ -249,9 +259,11 @@ def main():
     # Before each action: the panel docks opposite the target first (keeping
     # the stop window uncovered), then the stop window gets out of the way.
     panel.set_keep_clear_provider(
-        lambda: [stop_window.frameGeometry()] if stop_window.isVisible() else []
+        lambda: ([stop_window.frameGeometry()] if stop_window.isVisible() else [])
+        + _island_rects() + overlay.occupied_rects()
     )
     manager.sig_agent_target.connect(panel.dock_away_from)
+    manager.sig_agent_target.connect(island.avoid_target)
     manager.sig_agent_target.connect(stop_window.avoid_target)
     stop_window.on_stop.connect(manager.cancel_agent)
 
@@ -263,7 +275,17 @@ def main():
     # Checklist, „დავიბენი“, and the autopilot's words as the big caption
     manager.sig_agent_steps.connect(panel.show_agent_steps)
     panel.on_agent_lost.connect(manager.agent_request_replan)
-    manager.sig_agent_say.connect(overlay.show_agent_caption)
+    # Everything spoken comes out of the mascot's mouth as a speech bubble
+    # (this replaces the autopilot's bottom caption, which said the same).
+    manager.sig_speaking.connect(overlay.on_speaking)
+
+    # Island: what is happening right now, in Georgian
+    manager.sig_agent_running.connect(island_ctl.on_agent_running)
+    manager.sig_agent_state.connect(island_ctl.on_agent_state)
+    manager.sig_agent_action.connect(island_ctl.on_agent_action)
+    manager.sig_point_at.connect(island_ctl.on_point)
+    manager.sig_audio_level.connect(island_ctl.on_level)
+    island.on_close.connect(manager.dismiss_from_island)
 
     # Lesson recording
     def _record_start():
@@ -484,9 +506,9 @@ def main():
 
     # ── Show UI + start listener ──────────────────────────────────────────────
     overlay.show()        # persistent overlay (cursor follow)
-    # Panel visible from the start: its button and text box are the easiest
-    # way in for users who don't know the hotkey or the wake word.
-    panel.show()
+    # No chat panel on screen: the mascot (bottom-right) talks in a speech
+    # bubble and the island shows what is happening. Tray -> „პანელის
+    # ჩვენება“ still opens the panel.
     manager.start()        # begin ambient mic + wake-word scanning
 
     providers = cfg.describe()

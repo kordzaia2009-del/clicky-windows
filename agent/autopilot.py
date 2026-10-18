@@ -226,6 +226,8 @@ class AutopilotDeps:
     on_step: Callable[[int, int, Step], None] = lambda gi, si, s: None
     # the current goal's steps — at its start and after every replan
     on_steps: Callable[[int, List[Step]], None] = lambda gi, steps: None
+    # right before an action runs: (type, target label, say_ka) — never the typed text
+    on_action: Callable[[str, str, str], None] = lambda kind, label, say: None
     image_diff: Callable[[Any, Any], float] = image_diff
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     run_blocking: Optional[Callable] = None     # default: asyncio.to_thread
@@ -503,7 +505,12 @@ class Autopilot:
         self._say(decision.say_ka)
         steps_to_run = []
         target = None
-        if where is not None:
+        if where is not None and where.element is not None:
+            from types import SimpleNamespace
+            target = SimpleNamespace(x=where.px, y=where.py, label=where.label,
+                                     bbox=(where.px, where.py, where.px, where.py),
+                                     source="uia", element=where.element)
+        elif where is not None:
             target = {"x": where.px, "y": where.py, "space": "physical", "label": where.label}
         if kind == "type" and target is not None:
             steps_to_run.append({"type": "click", "target": target,
@@ -520,6 +527,11 @@ class Autopilot:
         if kind == "wait":
             exec_action["seconds"] = float(a.get("amount") or 1)
         steps_to_run.append(exec_action)
+
+        try:
+            self.d.on_action(kind, where.label if where else label, decision.say_ka)
+        except Exception:
+            log.debug("on_action failed", exc_info=True)
 
         for act in steps_to_run:
             self._check_cancel()

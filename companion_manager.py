@@ -239,6 +239,7 @@ class CompanionManager(QObject):
     sig_point_retarget      = pyqtSignal(float, float)    # nudge to a refined spot
     sig_error               = pyqtSignal(str)
     sig_transcript          = pyqtSignal(str)             # recognised speech, before answering
+    sig_speaking            = pyqtSignal(str)             # line being spoken ("" = finished) -> mascot bubble
     # Autopilot progress ("do" mode)
     sig_agent_plan          = pyqtSignal(object)          # list[agent.planner.Goal]
     sig_agent_step          = pyqtSignal(int, int, str)   # goal index, step index, step title
@@ -249,6 +250,7 @@ class CompanionManager(QObject):
     sig_agent_mode          = pyqtSignal(bool)            # True = "do" (keeps panel + tray in sync)
     sig_agent_steps         = pyqtSignal(int, object)     # goal index, list[Step] (start / replan)
     sig_agent_target        = pyqtSignal(float, float)    # logical px the next action aims at
+    sig_agent_action        = pyqtSignal(str, str, str)   # type, target label, say_ka (island)
     sig_copilot_models_done = pyqtSignal(int)             # arg = model count
     sig_models_refreshed    = pyqtSignal(str, int)        # (provider, count)
     sig_ollama_models       = pyqtSignal(dict)            # {"vision": [...], "text": [...]}
@@ -563,6 +565,9 @@ class CompanionManager(QObject):
             else:
                 from audio.tts.edge_tts_provider import EdgeTTSProvider
                 self._tts = EdgeTTSProvider()
+            # Every spoken line also goes to the mascot's speech bubble.
+            from audio.tts.reporting import ReportingTTS
+            self._tts = ReportingTTS(self._tts, self.sig_speaking.emit)
         return self._tts
 
     # ── Input sources ─────────────────────────────────────────────────────────
@@ -1324,14 +1329,20 @@ class CompanionManager(QObject):
             on_plan=lambda goals: self.sig_agent_plan.emit(goals),
             on_step=lambda gi, si, step: self.sig_agent_step.emit(gi, si, step.title),
             on_steps=lambda gi, steps: self.sig_agent_steps.emit(gi, list(steps)),
+            on_action=lambda kind, label, say: self.sig_agent_action.emit(kind, label, say),
         )
 
     def _agent_locate(self, label: str, shot):
-        """The existing locator chain for one label: UIA -> OCR (hybrid
-        pointer) -> Computer Use -> grid locator. Runs on a worker thread.
-        Returns physical pixels."""
+        """The locator chain for one label: pywinauto (control by name) ->
+        UIA -> OCR (hybrid pointer) -> Computer Use -> grid locator. Runs on
+        a worker thread. Returns physical pixels."""
         from agent.autopilot import Located
         from ai.hybrid_pointer import find_target
+        from ai.pwa_locator import find_control
+        found = find_control(label)
+        if found is not None:
+            cx, cy = found.center
+            return Located(cx, cy, found.name, found.wrapper, "pywinauto", found.is_password)
         try:
             t = find_target(label, screenshot=shot, skip_vision=True)
         except Exception:
@@ -1430,6 +1441,21 @@ class CompanionManager(QObject):
         cfg.agent_mode = "do" if do_tasks else "guide"
         cfg._write_env("CLICKY_AGENT_MODE", cfg.agent_mode)
         self.sig_agent_mode.emit(bool(do_tasks))
+
+    def dismiss_from_island(self):
+        """The island's ×: stop whatever is going on, gently — drop a
+        recording in progress, or stop the autopilot / the answer and its
+        speech."""
+        if self._agent_active:
+            self.cancel_agent()
+        if self._state == AppState.LISTENING and self._claim_end():
+            try:
+                self._listener.stop_recording()      # discard, don't transcribe
+            except Exception:
+                pass
+            self._emit_state(AppState.IDLE)
+            return
+        self.stop()
 
     def agent_request_replan(self):
         """„დავიბენი“ (button or speech): replan from the current screen."""

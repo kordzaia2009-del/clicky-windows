@@ -232,3 +232,27 @@ def test_spoken_lost_requests_a_replan(mgr):
     assert asked == [1]
     mgr.agent_request_replan()                    # the panel button
     assert asked == [1, 1]
+
+
+# ── island × (dismiss) ───────────────────────────────────────────────────────
+
+def test_island_close_drops_a_recording_in_progress(mgr):
+    stopped = []
+    mgr._listener.stop_recording = lambda: stopped.append(1) or b""
+    mgr._state = cm.AppState.LISTENING
+    mgr._end_claimed = False
+    mgr.dismiss_from_island()
+    assert stopped == [1] and mgr._state == cm.AppState.IDLE
+
+
+def test_island_close_stops_a_running_autopilot(mgr):
+    assert call(mgr, "გახსენი მეილი") is True
+    assert wait_until(lambda: mgr._agent is not None)
+    mgr.dismiss_from_island()
+    assert agent_executor.cancel_event.is_set()
+    assert wait_until(lambda: not mgr.agent_running)
+
+
+def test_island_close_stops_an_answer(mgr):
+    mgr.dismiss_from_island()                     # idle / speaking: just stop()
+    assert mgr._cancel_flag is True

@@ -87,6 +87,10 @@ for pkg in (
     "pynput",
     "pywhispercpp",
     "speech_recognition",       # Georgian STT — ships the FLAC encoder it needs
+    "pyautogui",                # autopilot typing
+    "pyperclip",
+    "pywinauto",                # autopilot: controls by name
+    "comtypes",
 ):
     try:
         d, b, h = collect_all(pkg)
@@ -100,6 +104,8 @@ hiddenimports += hidden
 
 # Panel logo — also read from next to Clicky.exe, so it can be swapped there.
 datas += [("assets/logo.png", "assets")]
+# Mascot frames (ui/mascot.py)
+datas += [("assets/mascot/*.png", "assets/mascot")]
 hiddenimports += collect_submodules("PyQt6")
 
 

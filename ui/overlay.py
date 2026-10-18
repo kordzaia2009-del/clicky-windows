@@ -13,6 +13,7 @@ Matches clicky-main/leanring-buddy/OverlayWindow.swift:
 """
 
 import math
+import os
 import random
 import time
 from typing import Optional
@@ -21,7 +22,17 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QPainterPath, QCursor, QFont,
+    QPixmap, QRadialGradient, QConicalGradient, QFontMetrics,
 )
+
+from ui.mascot import (
+    BUBBLE_MAX_W, MascotAnimator, bubble_geometry, load_frames, revealed_text,
+)
+
+try:   # loudness of the speech being played, for the mascot's mouth
+    from audio import playback as _playback
+except Exception:      # no audio stack (tests) — the mascot just idles
+    _playback = None
 
 
 MODE_IDLE      = "idle"
@@ -168,6 +179,17 @@ CAPTION_BG_ALPHA  = 128     # 0-255; half see-through so the screen shows behind
 AGENT_CAPTION_MIN_S = 4.0   # autopilot lines: shown at least this long...
 AGENT_CAPTION_CHARS_PER_S = 12.0   # ...plus reading time for elderly users
 
+# The 🍇 pointer, its golden comet trail, and the mascot
+GRAPE_RADIUS = 22              # logical px, frosted circle around the grapes
+TRAIL_SECONDS = 0.45           # how much of the flight path stays visible
+TRAIL_GOLD = (244, 192, 92)
+MASCOT_SIZE = 150              # logical px
+MASCOT_MARGIN = 18
+MASCOT_ENABLED = os.getenv("CLICKY_MASCOT", "1").strip() not in ("0", "false", "no")
+SAY_LINGER_S = 3.0             # the speech bubble stays this long after the words end
+SAY_FADE_IN_S, SAY_FADE_OUT_S = 0.18, 0.4
+SAY_MAX_LINES = 5
+
 # Teacher-pace pointing timings (seconds)
 # Flight duration scales with distance but stays slow enough to follow visually.
 FLY_DURATION_MIN = 1.6
@@ -180,6 +202,58 @@ _PHASE_FOLLOW    = "follow"
 _PHASE_FLYING    = "flying"
 _PHASE_DWELLING  = "dwelling"
 _PHASE_RETURNING = "returning"
+
+
+def render_grape_pixmap(dpr: float = 1.0) -> QPixmap:
+    """The 🍇 pointer: a frosted white disc holding a little bunch of grapes
+    (painted, not an emoji, so it looks the same on every PC)."""
+    pad = 6
+    side = 2 * (GRAPE_RADIUS + pad)
+    pm = QPixmap(int(round(side * dpr)), int(round(side * dpr)))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = QPointF(side / 2, side / 2)
+    # soft shadow + frosted disc
+    for r_add, a in ((4, 18), (2, 30)):
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, a))
+        p.drawEllipse(c + QPointF(0, 1.5), GRAPE_RADIUS + r_add, GRAPE_RADIUS + r_add)
+    disc = QRadialGradient(c + QPointF(-4, -5), GRAPE_RADIUS * 1.4)
+    disc.setColorAt(0.0, QColor(255, 255, 255, 245))
+    disc.setColorAt(1.0, QColor(225, 228, 240, 225))
+    p.setBrush(QBrush(disc))
+    p.setPen(QPen(QColor(255, 255, 255, 255), 1.2))
+    p.drawEllipse(c, GRAPE_RADIUS, GRAPE_RADIUS)
+    # the bunch is drawn for a 17 px disc and scaled to the real size
+    k = GRAPE_RADIUS / 17.0
+    p.translate(c)
+    p.scale(k, k)
+    p.translate(-c)
+    # stem + leaf
+    p.setPen(QPen(QColor(110, 70, 40), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(c + QPointF(0.5, -6.5), c + QPointF(2.0, -10.5))
+    leaf = QPainterPath()
+    leaf.moveTo(c + QPointF(2.0, -9.5))
+    leaf.cubicTo(c + QPointF(5.5, -13.0), c + QPointF(9.0, -10.5), c + QPointF(8.5, -7.0))
+    leaf.cubicTo(c + QPointF(6.0, -6.0), c + QPointF(3.5, -7.0), c + QPointF(2.0, -9.5))
+    p.setPen(QPen(QColor(60, 130, 50), 0.8))
+    p.setBrush(QColor(110, 190, 75))
+    p.drawPath(leaf)
+    # the bunch: rows of grapes, top to bottom
+    r = 3.4
+    for gx, gy in ((-5.6, -3.6), (0.0, -3.9), (5.6, -3.6),
+                   (-2.8, 1.6), (2.8, 1.6), (0.0, 6.8)):
+        g = QRadialGradient(c + QPointF(gx - 1.1, gy - 1.2), r * 1.6)
+        g.setColorAt(0.0, QColor(196, 150, 240))
+        g.setColorAt(0.45, QColor(122, 62, 190))
+        g.setColorAt(1.0, QColor(66, 22, 118))
+        p.setPen(QPen(QColor(50, 15, 90, 180), 0.6))
+        p.setBrush(QBrush(g))
+        p.drawEllipse(c + QPointF(gx, gy), r, r)
+    p.end()
+    return pm
 
 
 class CursorOverlay(QWidget):
@@ -233,6 +307,24 @@ class CursorOverlay(QWidget):
 
         # Thinking spinner phase
         self._spin_phase: float = 0.0
+
+        # 🍇 pointer (pre-rendered once per DPI) + golden flight trail
+        self._grape_pm = None
+        self._trail: list = []            # [(t, x, y)] global logical px
+
+        # Mascot (bottom-left): frame chosen every tick from speech + blinks
+        self._mascot = MascotAnimator()
+        self._mascot_frames = None        # loaded lazily (needs the DPR)
+        self._mascot_frame = "idle_eyes_open"
+
+        # Speech bubble: the line being spoken, revealed in step with the audio
+        self._say_line = ""
+        self._say_text = ""               # the part already spoken
+        self._say_gen = 0                 # playback clip number when the line started
+        self._say_done = False
+        self._say_t0 = 0.0
+        self._say_hide_at = float("inf")
+        self._say_rect = None             # global QRectF while visible
 
         # Recognised-speech caption
         self._caption_text: str = ""
@@ -301,6 +393,29 @@ class CursorOverlay(QWidget):
                                  else self._caption_t0 + hold_s)
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         self._caption_area = screen.availableGeometry()
+
+    def on_speaking(self, text: str):
+        """A spoken line starts (text) or ends ("") — from ReportingTTS."""
+        now = time.monotonic()
+        if text:
+            self._say_line, self._say_done = text, False
+            self._say_gen = _playback.playback_progress()[0] if _playback else 0
+            if not self._say_text:
+                self._say_t0 = now           # pop in only when it was hidden
+            self._say_text = ""
+            self._say_hide_at = float("inf")
+        else:
+            self._say_done = True
+            self._say_hide_at = now + SAY_LINGER_S
+
+    def occupied_rects(self):
+        """Screen areas the mascot and its bubble cover (global logical px):
+        the stop window and panel keep off them."""
+        from PyQt6.QtCore import QRect
+        rects = [self.mascot_rect()]
+        if self._say_rect is not None:
+            rects.append(self._say_rect.toAlignedRect())
+        return rects
 
     def show_agent_caption(self, text: str):
         """What the autopilot says, as the same large caption. During a run
@@ -517,7 +632,29 @@ class CursorOverlay(QWidget):
         self._ring = None
         self._arrow_target = None
 
+    def _tick_extras(self):
+        now = time.monotonic()
+        if _playback is not None:
+            speaking, level = _playback.is_playing(), _playback.speaking_level()
+        else:
+            speaking, level = False, 0.0
+        self._mascot_frame = self._mascot.frame(now, speaking, level)
+        if self._say_line:
+            if now >= self._say_hide_at + SAY_FADE_OUT_S:
+                self._say_line = self._say_text = ""
+                self._say_rect = None
+            elif self._say_done:
+                self._say_text = revealed_text(self._say_line, 1.0)
+            elif _playback is not None:
+                gen, progress = _playback.playback_progress()
+                self._say_text = revealed_text(self._say_line, progress if gen > self._say_gen else 0.0)
+        if self._flight_phase in (_PHASE_FLYING, _PHASE_RETURNING):
+            self._trail.append((now, self._display_pos.x(), self._display_pos.y()))
+        if self._trail:
+            self._trail = [pt for pt in self._trail if now - pt[0] < TRAIL_SECONDS]
+
     def _tick(self):
+        self._tick_extras()
         qp = QCursor.pos()
         real = QPointF(qp.x(), qp.y())
 
@@ -626,6 +763,12 @@ class CursorOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Mascot is the bottom layer: everything else draws over it
+        if MASCOT_ENABLED:
+            self._draw_mascot(p)
+            self._draw_speech_bubble(p)
 
         # Ring goes UNDER the buddy
         if self._ring is not None and self._flight_phase in (
@@ -645,13 +788,14 @@ class CursorOverlay(QWidget):
         cx = self._display_pos.x() - self.x()
         cy = self._display_pos.y() - self.y()
 
+        if self._trail:
+            self._draw_trail(p)
+        self._draw_grape(p, cx, cy)
+        # Minimal cues around the pointer; the island shows the full status
         if self._mode == MODE_LISTENING:
-            self._draw_waveform(p, cx, cy)
+            self._draw_listen_ring(p, cx, cy)
         elif self._mode == MODE_THINKING:
-            self._draw_spinner(p, cx, cy)
-        else:
-            # idle, speaking, pointing
-            self._draw_triangle(p, cx, cy)
+            self._draw_think_arc(p, cx, cy)
 
         if self._arrow_target is not None and self._flight_phase in (
             _PHASE_FLYING, _PHASE_DWELLING
@@ -735,6 +879,10 @@ class CursorOverlay(QWidget):
         # The overlay spans every monitor, so convert to window-local coords.
         left = area.x() + (area.width() - box_w) / 2 - self.x()
         top = area.y() + area.height() - box_h - 48 - self.y()
+        if self._say_rect is not None:
+            bubble = self._say_rect.translated(-self.x(), -self.y()).adjusted(-16, -16, 16, 16)
+            if QRectF(left, top, box_w, box_h).intersects(bubble):
+                left = max(area.x() - self.x() + 16, bubble.left() - box_w)
         box = QRectF(left, top, box_w, box_h)
 
         p.setPen(Qt.PenStyle.NoPen)
@@ -938,87 +1086,159 @@ class CursorOverlay(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QPointF(cx, cy), radius * r_mul, radius * r_mul)
 
-    def _draw_triangle(self, p, cx, cy):
-        """Flat blue equilateral triangle, rotated -35° → cursor-like tilt."""
-        size = TRI_SIZE
-        height = size * math.sqrt(3) / 2
+    # ── 🍇 pointer ────────────────────────────────────────────────────────────
 
-        # Build triangle in local coords, then rotate/translate
-        path = QPainterPath()
-        path.moveTo(0, -height / 1.5)              # top vertex
-        path.lineTo(-size / 2, height / 3)         # bottom-left
-        path.lineTo( size / 2, height / 3)         # bottom-right
-        path.closeSubpath()
+    def _grape_pixmap(self) -> QPixmap:
+        dpr = self.devicePixelRatioF() or 1.0
+        if self._grape_pm is not None and abs(self._grape_pm.devicePixelRatio() - dpr) < 0.01:
+            return self._grape_pm
+        self._grape_pm = render_grape_pixmap(dpr)
+        return self._grape_pm
 
+    def _draw_grape(self, p, cx, cy):
+        pm = self._grape_pixmap()
+        half = pm.width() / pm.devicePixelRatio() / 2
         p.save()
         p.translate(cx, cy)
-
-        # Glow — drawn unrotated so it's a round halo
-        glow = QColor(CURSOR_BLUE)
-        for i, (r_mul, alpha) in enumerate(((2.2, 35), (1.6, 55), (1.15, 85))):
-            glow.setAlpha(alpha)
-            p.setBrush(QBrush(glow))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(0, 0), size * r_mul * 0.5, size * r_mul * 0.5)
-
-        p.rotate(self._rotation_deg)
         p.scale(self._flight_scale, self._flight_scale)
-        p.setBrush(QBrush(CURSOR_BLUE))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawPath(path)
-
+        if self._flight_phase in (_PHASE_FLYING, _PHASE_DWELLING):
+            glow = QColor(*TRAIL_GOLD)
+            for r_mul, a in ((1.9, 30), (1.4, 55)):
+                glow.setAlpha(a)
+                p.setBrush(glow)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(QPointF(0, 0), GRAPE_RADIUS * r_mul, GRAPE_RADIUS * r_mul)
+        p.drawPixmap(QPointF(-half, -half), pm)
         p.restore()
 
-    def _draw_waveform(self, p, cx, cy):
-        """5 vertical rounded bars reacting to audio (mirrors BlueCursorWaveformView)."""
-        bar_count = 5
-        profile = (0.4, 0.7, 1.0, 0.7, 0.4)
-        bar_w = 2.0
-        spacing = 2.0
-        total_w = bar_count * bar_w + (bar_count - 1) * spacing
+    def _draw_listen_ring(self, p, cx, cy):
+        """Listening: a thin ring that breathes with the voice."""
+        level = min(1.0, self._audio_level)
+        r = GRAPE_RADIUS + 4 + level * 10 + (math.sin(self._phase * 1.6) + 1) * 1.2
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(90, 175, 255, 170), 2))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setPen(QPen(QColor(90, 175, 255, 60), 4))
+        p.drawEllipse(QPointF(cx, cy), r + 3, r + 3)
 
-        # Glow behind bars
-        glow = QColor(CURSOR_BLUE)
-        for r_mul, a in ((2.0, 40), (1.3, 70)):
-            glow.setAlpha(a)
-            p.setBrush(QBrush(glow))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), 10 * r_mul, 10 * r_mul)
-
-        p.setBrush(QBrush(CURSOR_BLUE))
-        p.setPen(Qt.PenStyle.NoPen)
-
-        for i in range(bar_count):
-            phase = self._phase * 1.8 + i * 0.35
-            reactive = self._audio_level * 10 * profile[i]
-            idle_pulse = (math.sin(phase) + 1) / 2 * 1.5
-            h = 3 + reactive + idle_pulse
-            x = cx - total_w / 2 + i * (bar_w + spacing)
-            y = cy - h / 2
-            p.drawRoundedRect(QRectF(x, y, bar_w, h), 1.2, 1.2)
-
-    def _draw_spinner(self, p, cx, cy):
-        """Rotating arc — mirrors BlueCursorSpinnerView (trim 0.15 → 0.85)."""
-        diameter = 14.0
-        rect = QRectF(cx - diameter / 2, cy - diameter / 2, diameter, diameter)
-
-        # Glow
-        glow = QColor(CURSOR_BLUE)
-        for r_mul, a in ((2.0, 40), (1.3, 70)):
-            glow.setAlpha(a)
-            p.setBrush(QBrush(glow))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), diameter * r_mul * 0.5, diameter * r_mul * 0.5)
-
-        pen = QPen(CURSOR_BLUE, 2.5)
+    def _draw_think_arc(self, p, cx, cy):
+        """Loading: one thin arc fading round the pointer."""
+        r = GRAPE_RADIUS + 5
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        angle = -math.degrees(self._spin_phase * 2)
+        grad = QConicalGradient(QPointF(cx, cy), angle)
+        grad.setColorAt(0.0, QColor(120, 160, 255, 230))
+        grad.setColorAt(0.35, QColor(190, 120, 255, 140))
+        grad.setColorAt(0.7, QColor(190, 120, 255, 0))
+        pen = QPen(QBrush(grad), 2.4)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(rect, int(angle * 16), int(250 * 16))
 
-        # 70% of the circle (0.15→0.85), rotating
-        start_deg = -self._spin_phase * 180 / math.pi * 2
-        span_deg = 252   # 0.7 * 360
-        p.drawArc(rect, int(start_deg * 16) % (360 * 16), int(span_deg * 16))
+    def _draw_trail(self, p):
+        """Golden comet tail along the flight path: wide and bright at the
+        pointer, thin and transparent at the start."""
+        pts = [(x - self.x(), y - self.y()) for _, x, y in self._trail]
+        n = len(pts)
+        if n < 2:
+            return
+        for glow_pass in (True, False):
+            for i in range(1, n):
+                f = i / (n - 1)
+                width = 3 + 15 * f
+                alpha = int(210 * f ** 1.3)
+                col = QColor(*TRAIL_GOLD, int(alpha * (0.28 if glow_pass else 1.0)))
+                pen = QPen(col, width * (2.0 if glow_pass else 1.0))
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                p.setPen(pen)
+                p.drawLine(QPointF(*pts[i - 1]), QPointF(*pts[i]))
+
+    # ── Speech bubble ─────────────────────────────────────────────────────────
+
+    def _draw_speech_bubble(self, p):
+        if not self._say_text:
+            self._say_rect = None
+            return
+        now = time.monotonic()
+        alpha = min(1.0, (now - self._say_t0) / SAY_FADE_IN_S)
+        if now > self._say_hide_at:
+            alpha *= max(0.0, 1.0 - (now - self._say_hide_at) / SAY_FADE_OUT_S)
+        if alpha <= 0.0:
+            return
+
+        font = QFont()
+        font.setFamilies(["Segoe UI", "Sylfaen"])
+        font.setPixelSize(20)
+        fm = QFontMetrics(font)
+        pad = 16
+        flags = int(Qt.TextFlag.TextWordWrap)
+        max_w = BUBBLE_MAX_W - 2 * pad
+        text = self._say_text
+        br = fm.boundingRect(0, 0, max_w, 10_000, flags, text)
+        while br.height() > fm.lineSpacing() * SAY_MAX_LINES and " " in text:
+            text = text.split(" ", 1)[1]          # keep the newest words
+            br = fm.boundingRect(0, 0, max_w, 10_000, flags, "… " + text)
+        if text != self._say_text:
+            text = "… " + text
+        size = (max(br.width(), 60) + 2 * pad, br.height() + 2 * pad)
+
+        m = self.mascot_rect()
+        a = QApplication.primaryScreen().availableGeometry()
+        (bx, by, bw, bh), (tx, ty) = bubble_geometry(
+            (a.x(), a.y(), a.width(), a.height()), (m.x(), m.y(), m.width(), m.height()), size)
+        self._say_rect = QRectF(bx, by, bw, bh)
+        ox, oy = self.x(), self.y()
+        rect = QRectF(bx - ox, by - oy, bw, bh)
+        tip = QPointF(tx - ox, ty - oy)
+
+        # bubble + tail as one shape, so the outline flows into the tail
+        path = QPainterPath()
+        path.addRoundedRect(rect, 18, 18)
+        base_x = min(rect.right() - 30, max(rect.left() + 30, tip.x() - 40))
+        tail = QPainterPath()
+        tail.moveTo(base_x - 14, rect.bottom() - 2)
+        tail.quadTo(base_x + 4, rect.bottom() + 14, tip.x(), tip.y())
+        tail.quadTo(base_x + 14, rect.bottom() + 4, base_x + 18, rect.bottom() - 2)
+        tail.closeSubpath()
+        shape = path.united(tail)
+
+        p.save()
+        pop = 0.92 + 0.08 * alpha if now - self._say_t0 < SAY_FADE_IN_S else 1.0
+        p.translate(tip)
+        p.scale(pop, pop)
+        p.translate(-tip)
+        p.setPen(Qt.PenStyle.NoPen)
+        for grow, a_ in ((6, 14), (3, 22)):
+            p.setBrush(QColor(0, 0, 0, int(a_ * alpha)))
+            p.drawRoundedRect(rect.adjusted(-grow, -grow + 3, grow, grow + 3), 18 + grow, 18 + grow)
+        p.setBrush(QColor(252, 252, 254, int(248 * alpha)))
+        p.setPen(QPen(QColor(0, 0, 0, int(40 * alpha)), 1.2))
+        p.drawPath(shape)
+        p.setFont(font)
+        p.setPen(QColor(26, 26, 32, int(255 * alpha)))
+        p.drawText(rect.adjusted(pad, pad, -pad, -pad), flags, text)
+        p.restore()
+
+    # ── Mascot ────────────────────────────────────────────────────────────────
+
+    def mascot_rect(self):
+        """Where the mascot sits (global logical px): bottom-right, standing
+        on the taskbar. Used to keep the panel and stop window off it."""
+        from PyQt6.QtCore import QRect
+        a = QApplication.primaryScreen().availableGeometry()
+        return QRect(a.right() - MASCOT_MARGIN - MASCOT_SIZE, a.bottom() - MASCOT_SIZE - 4,
+                     MASCOT_SIZE, MASCOT_SIZE)
+
+    def _draw_mascot(self, p):
+        if self._mascot_frames is None:
+            self._mascot_frames = load_frames(MASCOT_SIZE, self.devicePixelRatioF() or 1.0)
+        pm = self._mascot_frames.get(self._mascot_frame)
+        if pm is None:
+            return
+        r = self.mascot_rect()
+        bob = math.sin(time.monotonic() * 1.6) * 1.5      # gentle idle breathing
+        p.drawPixmap(QPointF(r.x() - self.x(), r.y() - self.y() + bob), pm)
 
     def _draw_bubble(self, p, cx, cy, label: str):
         """Speech bubble next to the buddy, matches Swift pill style."""

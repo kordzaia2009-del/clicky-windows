@@ -215,6 +215,9 @@ class CompanionPanel(QWidget):
         super().__init__()
         self._state = AppState.IDLE
         self._agent_running = False
+        # The mascot and its speech bubble are the main UI now; the panel
+        # only appears when opened from the tray (or for a sign-in code).
+        self.auto_show = False
         self._agent_goals = []
         self._agent_goal_idx = 0
         self._agent_steps = []
@@ -618,15 +621,17 @@ class CompanionPanel(QWidget):
         self._question_label.setText(f"თქვენ: {text}")
         self._question_label.setVisible(True)
         self.clear_response()
-        if not self.isVisible():
-            self.show()
+        self._maybe_show()
 
     def _on_error(self, text: str):
         if self._response_text:
             self._response_text += "\n\n"
         self._response_text += f"⚠️ {text}"
         self._response_label.setText(self._response_text)
-        if not self.isVisible():
+        self._maybe_show()
+
+    def _maybe_show(self):
+        if self.auto_show and not self.isVisible():
             self.show()
 
     # ── Autopilot ─────────────────────────────────────────────────────────────
@@ -717,16 +722,15 @@ class CompanionPanel(QWidget):
         if kind == "confirm":
             self._confirm_banner.setText(f"{strings_ka.CONFIRM_BANNER_TITLE}\n{question}")
         self._confirm_banner.setVisible(kind == "confirm")
-        if shown and not self.isVisible():
-            self.show()
+        if shown:
+            self._maybe_show()
 
     def show_agent_say(self, text: str):
         if self._response_text:
             self._response_text += "\n"
         self._response_text += f"• {text}"
         self._response_label.setText(self._response_text)
-        if not self.isVisible():
-            self.show()
+        self._maybe_show()
 
     def show_agent_plan(self, goals):
         self._agent_goals = list(goals or [])

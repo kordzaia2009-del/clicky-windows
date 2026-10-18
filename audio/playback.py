@@ -20,6 +20,29 @@ import av
 # Single global flag — flipping this stops every active playback in this process
 _stop_event = threading.Event()
 
+# What is playing right now, for the mascot's mouth (read from the GUI
+# thread; plain floats/bools are safe to read without a lock).
+_playing = False
+_level = 0.0          # RMS of the 50 ms block being played, 0..~0.5
+_progress = 0.0       # how much of the current clip has played, 0..1
+_generation = 0       # bumps at the start of every clip
+
+
+def is_playing() -> bool:
+    """True while speech audio is actually coming out of the speakers."""
+    return _playing
+
+
+def speaking_level() -> float:
+    """Loudness of the block playing now (0 when silent)."""
+    return _level if _playing else 0.0
+
+
+def playback_progress() -> tuple:
+    """(clip number, fraction played) — lets the mascot's speech bubble show
+    words in step with the voice."""
+    return _generation, _progress
+
 
 def stop_audio() -> None:
     """Cancel any in-progress playback immediately. Safe to call from any thread."""
@@ -65,12 +88,15 @@ def _blocking_play_chunked(pcm: np.ndarray, sr: int) -> None:
     """Play PCM through an OutputStream, polling _stop_event between blocks
     so cancellation takes effect within ~50 ms instead of 'when the buffer
     runs out'."""
+    global _playing, _level, _progress, _generation
     if pcm.size == 0:
         return
 
     block = max(1, int(sr * 0.05))    # 50 ms blocks
     pcm = pcm.reshape(-1, 1) if pcm.ndim == 1 else pcm
 
+    _playing, _level, _progress = True, 0.0, 0.0
+    _generation += 1
     try:
         with sd.OutputStream(samplerate=sr, channels=1, dtype="float32") as stream:
             i = 0
@@ -78,21 +104,29 @@ def _blocking_play_chunked(pcm: np.ndarray, sr: int) -> None:
                 if _stop_event.is_set():
                     return
                 end = min(i + block, len(pcm))
+                _level = float(np.sqrt(np.mean(pcm[i:end] ** 2)))
                 stream.write(pcm[i:end])
                 i = end
+                _progress = i / len(pcm)
     except Exception:
         # Fallback: play everything in one shot. Less responsive to stop, but
         # never silently fails on weird devices.
+        _level = 0.0          # unknown loudness: the mascot flaps its mouth instead
         try:
             sd.play(pcm.flatten(), samplerate=sr)
+            import time as _time
+            started, duration = _time.monotonic(), len(pcm) / float(sr)
             # Poll the stop event during wait
             while sd.get_stream().active:
                 if _stop_event.is_set():
                     sd.stop()
                     return
+                _progress = min(1.0, (_time.monotonic() - started) / duration)
                 sd.sleep(50)
         except Exception:
             pass
+    finally:
+        _playing, _level, _progress = False, 0.0, 1.0
 
 
 async def play_mp3_async(mp3_bytes: bytes) -> None:

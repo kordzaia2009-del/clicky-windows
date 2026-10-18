@@ -310,7 +310,31 @@ class _Win32:
         except Exception:
             return None
 
+    def type_text(self, text: str) -> str:
+        """Type with the configured backend (agent/typing_backends.py).
+        Returns how it was typed; falls back to SendInput if the backend's
+        package is missing."""
+        from agent import typing_backends as tb
+        backend = tb.configured_backend()
+        try:
+            if backend == "pyautogui":
+                return tb.type_with_pyautogui(text)
+            if backend == "pywinauto":
+                return tb.type_with_pywinauto(text)
+        except ImportError:
+            log.warning("%s is not installed — typing with SendInput", backend)
+        self.type_unicode(text)
+        return "unicode"
+
     def element_rect(self, element) -> Optional[Tuple[int, int, int, int]]:
+        if hasattr(element, "rectangle") and not hasattr(element, "BoundingRectangle"):
+            try:                                    # pywinauto wrapper
+                r = element.rectangle()
+                if r.right > r.left and r.bottom > r.top:
+                    return int(r.left), int(r.top), int(r.right), int(r.bottom)
+            except Exception:
+                pass
+            return None
         try:
             r = element.BoundingRectangle
             if r and r.width() > 0 and r.height() > 0:
@@ -322,6 +346,16 @@ class _Win32:
     def uia_activate(self, element) -> Optional[str]:
         """Invoke (buttons, links, menu items) or Select (list/tab items).
         Returns the method used, or None when neither pattern works."""
+        if hasattr(element, "invoke") and not hasattr(element, "GetPattern"):
+            # pywinauto wrapper: its own Invoke / Select
+            for method, name in (("invoke", "pywinauto-invoke"), ("select", "pywinauto-select")):
+                try:
+                    if hasattr(element, method):
+                        getattr(element, method)()
+                        return name
+                except Exception as e:
+                    log.debug("pywinauto %s failed: %s", method, e)
+            return None
         try:
             import uiautomation as auto
         except Exception:
@@ -343,6 +377,19 @@ class _Win32:
 
 
 win = _Win32()
+
+
+def _element_pid(element) -> Optional[int]:
+    """Process id of a UI element — uiautomation (ProcessId) or pywinauto
+    (process_id())."""
+    try:
+        if hasattr(element, "ProcessId"):
+            return int(element.ProcessId)
+        if hasattr(element, "process_id"):
+            return int(element.process_id())
+    except Exception:
+        pass
+    return None
 
 
 # ── Target resolution ────────────────────────────────────────────────────────
@@ -565,10 +612,7 @@ class _Run:
                 f"not clicking through it"
             )
         if where.element is not None:
-            try:
-                owner = int(where.element.ProcessId)
-            except Exception:
-                owner = None
+            owner = _element_pid(where.element)
             if owner and pid and owner != pid:
                 raise _Refused(
                     f"{where.name!r} is covered by another window ({title or cls!r}); "
@@ -618,12 +662,26 @@ class _Run:
             raise _Refused("the focused field is a password field — not typing into it")
         self.check_cancel()
         self.log("typing", chars=len(text))
+        from agent import typing_backends as tb
+        backend = tb.configured_backend()
         if self.dry:
-            return self.result("dry_run", f"would type {len(text)} characters", "unicode")
-        for i in range(0, len(text), TYPE_CHUNK):
-            self.wait(0.03)                      # cancel/pause between chunks
-            win.type_unicode(text[i:i + TYPE_CHUNK])
-        return self.result("done", f"typed {len(text)} characters", "unicode")
+            return self.result("dry_run", f"would type {len(text)} characters", backend)
+        # Pasted text (pyautogui + Georgian) goes in one go; typed text in
+        # small chunks so Esc / a moving mouse can still stop it midway.
+        if backend == "pyautogui" and not tb.is_plain_ascii(text):
+            chunks = [text]
+        else:
+            chunks = [text[i:i + TYPE_CHUNK] for i in range(0, len(text), TYPE_CHUNK)]
+        method = "unicode"
+        try:
+            for chunk in chunks:
+                self.wait(0.03)                  # cancel/pause between chunks
+                method = win.type_text(chunk)
+        except Exception as e:
+            if type(e).__name__ == "FailSafeException":     # pyautogui: mouse in a corner
+                raise _Cancelled() from e
+            raise
+        return self.result("done", f"typed {len(text)} characters", method)
 
     def do_key(self) -> ActionResult:
         vks = parse_keys(self.action.get("keys"))

@@ -38,6 +38,10 @@ class FakeWin:
     def wheel(self, clicks): self.calls.append(("wheel", clicks))
     def press_keys(self, vks): self.calls.append(("keys", tuple(vks)))
     def type_unicode(self, text): self.calls.append(("type", text))
+
+    def type_text(self, text):
+        self.calls.append(("type", text))
+        return "unicode"
     def window_at(self, x, y): return self.window
     def focused_is_password(self): return self.password
     def element_rect(self, element):
@@ -66,6 +70,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(ex, "POLL_S", 0.005)
     monkeypatch.setattr(ex, "RESUME_STILL_S", 0.05)
     monkeypatch.setattr(ex._Run, "flight_seconds", lambda self, lx, ly: 0.0)
+    monkeypatch.setenv("CLICKY_TYPE_BACKEND", "sendinput")   # chunked typing in these tests
     ex.set_dry_run(False)
     ex.reset_cancel()
     yield w

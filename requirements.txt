@@ -63,3 +63,6 @@ pynput>=1.7.7
 # aiortc>=1.9.0
 # Georgian speech recognition (Google web speech, no key)
 SpeechRecognition==3.14.3
+# Autopilot input: typing (pyautogui) and controls by name (pywinauto)
+pyautogui==0.9.54
+pywinauto==0.6.9

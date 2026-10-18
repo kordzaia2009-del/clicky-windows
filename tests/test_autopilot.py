@@ -329,3 +329,20 @@ def test_user_replan_between_attempts():
     out = asyncio.run(machine.handle("მოძებნე"))
     assert out.state == ap.State.DONE
     assert [e for e in env.events if e == ("plan",)] == [("plan",)] * 2
+
+
+# ── island hook (on_action) ──────────────────────────────────────────────────
+
+def test_on_action_announces_each_action_before_it_runs_without_typed_text():
+    goal = Goal("ძებნა", steps("ა", "ბ", "გ"))
+    env = Env([TASK(goal)], [act("double_click", "Zoom Workplace", say="ვხსნი ზუმს"), done(),
+                             act("type", "Search", text="საიდუმლო", say=""), done(), done()])
+    machine = env.machine()
+    seen = []
+    machine.d.on_action = lambda kind, label, say: (seen.append((kind, label, say)),
+                                                    env.events.append(("announce",)))
+    asyncio.run(machine.handle("გახსენი ზუმი"))
+    assert seen == [("double_click", "Zoom Workplace", "ვხსნი ზუმს"), ("type", "Search", "")]
+    first = env.events.index(("announce",))
+    assert env.events[first + 1][0] == "execute"             # announced, then executed
+    assert all("საიდუმლო" not in str(s) for s in seen)
