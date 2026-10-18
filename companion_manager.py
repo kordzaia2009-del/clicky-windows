@@ -226,6 +226,17 @@ POINT_TRIGGER_RE = re.compile(
 )
 
 
+class _RoutineRun:
+    """Stands in for the Autopilot in self._agent while a routine runs, so
+    stop words and the stop window reach it the same way."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def request_replan(self):
+        pass                           # a routine has no plan to redo
+
+
 class CompanionManager(QObject):
     """Thread-safe signals for Qt UI updates from async/audio threads."""
 
@@ -237,6 +248,7 @@ class CompanionManager(QObject):
     sig_point_hold          = pyqtSignal(bool)            # True → dwell forever until release
     sig_point_release       = pyqtSignal()                # end dwell + fly buddy back
     sig_point_retarget      = pyqtSignal(float, float)    # nudge to a refined spot
+    sig_point_speed         = pyqtSignal(float)           # flight time multiplier (routines: fast)
     sig_error               = pyqtSignal(str)
     sig_transcript          = pyqtSignal(str)             # recognised speech, before answering
     sig_speaking            = pyqtSignal(str)             # line being spoken ("" = finished) -> mascot bubble
@@ -258,6 +270,8 @@ class CompanionManager(QObject):
     sig_ollama_pull_status  = pyqtSignal(str, str)        # (model_name, status_msg)
     sig_arrow               = pyqtSignal(float, float, float, float)
     sig_circle              = pyqtSignal(float, float, float)
+    sig_circle_for          = pyqtSignal(float, float, float, float)   # x, y, radius, ttl s
+    sig_circle_around       = pyqtSignal(float, float, float, float)   # x, y, radius, hold s (pointer laps it)
     sig_underline           = pyqtSignal(float, float, float)
     sig_label               = pyqtSignal(float, float, str)
     sig_draw                = pyqtSignal(dict)            # generic teaching shape → overlay
@@ -769,6 +783,14 @@ class CompanionManager(QObject):
             # voice commands, so a misheard one is visible too.
             self.sig_transcript.emit(transcript.strip())
 
+            # ── „მაჩვენე ხრომი“: point at + circle an icon (no model call) ──
+            if await self._show_intercept(transcript):
+                return
+
+            # ── „რომელია / სად არის X?“: circle any app's icon + explain it ──
+            if await self._which_intercept(transcript):
+                return
+
             # ── Autopilot: "do" mode tasks, and replies while one runs ──
             if await self._agent_intercept(transcript):
                 return
@@ -1198,6 +1220,92 @@ class CompanionManager(QObject):
             pass
         self._emit_state(AppState.IDLE)
 
+    async def _show_intercept(self, transcript: str) -> bool:
+        """„მაჩვენე ხრომი“ (agent/show_icon.py): glide to the app's icon and
+        circle it — any mode, never while the autopilot is busy. Only an
+        exact short command matches; everything else goes on as before."""
+        from agent.show_icon import match_show, show_icon
+        if self._agent_active:
+            return False
+        app = match_show(transcript)
+        if app is None:
+            return False
+        from agent import executor as agent_executor
+        from agent.routines import RoutineUI
+        loop = asyncio.get_running_loop()
+        ui = RoutineUI(
+            point_at=self.sig_point_at.emit,
+            point_hold=self.sig_point_hold.emit,
+            point_release=self.sig_point_release.emit,
+            set_speed=self.sig_point_speed.emit,
+            say=lambda text: asyncio.run_coroutine_threadsafe(self._say_and_wait(text), loop),
+            circle=self.sig_circle_for.emit,
+        )
+        agent_executor.reset_cancel()
+        self.sig_clear_drawings.emit()
+        await loop.run_in_executor(None, show_icon, app, ui, agent_executor.cancel_event,
+                                   1.7 if self._slow_mode else 1.0)
+        return True
+
+    WHICH_HOLD_S = 3.0          # the ring stays this long after the lap, then back to the cursor
+    WHICH_CIRCLE_PAD = 1.3      # ring radius = half the icon's size x this, + 10 px
+    WHICH_EXPLAIN_WAIT_S = 4.0  # a known name is circled at once; the model's line may take this long
+
+    async def _which_intercept(self, transcript: str) -> bool:
+        """„რომელია ხრომი?“ / „სად არის ვორდი?“ (agent/which_app.py): the
+        model picks the icon among those on screen (desktop + taskbar) and
+        explains it; the pointer flies there, its 🍇 hides, it laps a circle
+        round the icon while the explanation is spoken, then flies back.
+        The real mouse does not move. Anything not about an app — or any
+        failure — returns False and the normal flow answers."""
+        from agent.which_app import SAY_NOT_ON_SCREEN, is_which_question, local_pick, pick_app
+        if self._agent_active or not is_which_question(transcript):
+            return False
+        from agent import show_icon
+        from timing import timed
+        loop = asyncio.get_running_loop()
+        self._emit_state(AppState.THINKING)
+        with timed("which_app.icons") as tm:
+            icons = await loop.run_in_executor(None, show_icon.finder.icons)
+            tm["count"] = len(icons)
+        if not icons:
+            return False
+        ai = asyncio.ensure_future(pick_app(transcript, icons, self._get_llm(), self._current_model))
+        local = local_pick(transcript, icons)
+        if local is not None:
+            # A known name: circle it right away; the model only words the
+            # explanation (a plain line if it is slow, down, or disagrees).
+            icon = show_icon.best_of(icons, icons[local.index])
+            self._circle_icon(icon, transcript)
+            try:
+                pick = await asyncio.wait_for(asyncio.shield(ai), self.WHICH_EXPLAIN_WAIT_S)
+            except Exception:
+                pick = None
+            agrees = (pick is not None and pick.asked_app and pick.index is not None
+                      and icons[pick.index].name.lower() == icon.name.lower())
+            await self._reply_local(pick.explain if agrees and pick.explain else local.explain)
+            return True
+        pick = await ai                          # an unknown name: the model decides
+        if pick is None or not pick.asked_app:
+            return False
+        if pick.index is None:
+            await self._reply_local(pick.explain or SAY_NOT_ON_SCREEN)
+            return True
+        icon = show_icon.best_of(icons, icons[pick.index])
+        self._circle_icon(icon, transcript)
+        await self._reply_local(pick.explain or icon.name)
+        return True
+
+    def _circle_icon(self, icon, transcript: str = ""):
+        from agent.executor import to_logical
+        l, t, r, b = icon.rect
+        lx0, ly0 = to_logical(l, t)
+        lx1, ly1 = to_logical(r, b)
+        radius = max(lx1 - lx0, ly1 - ly0) / 2.0 * self.WHICH_CIRCLE_PAD + 10.0
+        _log.info("which app: %r -> %s on the %s", transcript[:60], icon.name, icon.where)
+        self.sig_clear_drawings.emit()
+        self.sig_circle_around.emit((lx0 + lx1) / 2.0, (ly0 + ly1) / 2.0, radius, self.WHICH_HOLD_S)
+
     # ── Autopilot ("do" mode) ─────────────────────────────────────────────────
 
     async def _agent_intercept(self, transcript: str) -> bool:
@@ -1237,6 +1345,11 @@ class CompanionManager(QObject):
             await self._reply_local("ერთი წუთით — ჯერ წინა დავალებას ვასრულებ.")
             return True
         self._agent_active = True
+        from agent.routines import match_routine
+        routine = match_routine(transcript)
+        if routine:                                       # code only, no planner call
+            self._agent_start_routine(routine)
+            return True
         try:
             pilot = Autopilot(
                 self._agent_deps(), agent_executor.cancel_event,
@@ -1257,6 +1370,9 @@ class CompanionManager(QObject):
         if agent_executor.cancel_event.is_set():          # stopped while planning
             self._agent_finished()
             self._agent_say("კარგი, გავჩერდი.")
+            return True
+        if plan.routine:                                  # the planner picked a routine
+            self._agent_start_routine(plan.routine)
             return True
         self._agent = pilot
         self.sig_agent_running.emit(True)
@@ -1292,6 +1408,60 @@ class CompanionManager(QObject):
             await pilot.run_plan(plan)
         finally:
             self._agent_finished()
+
+    def record_routine(self, name: str, step: int = 0):
+        """Edit mode from the tray (thread-safe): record where a routine
+        clicks — step 0 = every step, k = only step k."""
+        async def _start():
+            if not self._agent_lock.acquire(blocking=False):
+                await self._reply_local("ერთი წუთით — ჯერ წინა დავალებას ვასრულებ.")
+                return
+            self._agent_active = True
+            self._agent_start_routine(name, record_step=step)
+        self._submit(_start())
+
+    def _agent_start_routine(self, name: str, record_step: Optional[int] = None):
+        """Run a code-only routine (agent/routines.py) on a worker thread —
+        or, with record_step, its edit mode. Expects the single-flight lock
+        held; _agent_finished releases it."""
+        from agent import executor as agent_executor
+        from agent.routines import RoutineUI, record_routine, run_routine
+        if cfg.agent_dry_run:
+            _log.info("routine %s skipped: dry run", name)
+            self._agent_finished()
+            self._agent_say("საცდელ რეჟიმში ამას არ ვაკეთებ.")
+            return
+        agent_executor.reset_cancel()
+        loop = self._loop
+        ui = RoutineUI(
+            point_at=lambda x, y, label: (self.sig_agent_target.emit(x, y),
+                                          self.sig_point_at.emit(x, y, label)),
+            point_hold=self.sig_point_hold.emit,
+            point_release=self.sig_point_release.emit,
+            set_speed=self.sig_point_speed.emit,
+            say=lambda text: asyncio.run_coroutine_threadsafe(self._say_and_wait(text), loop),
+            on_action=self.sig_agent_action.emit,
+        )
+        flight_scale = 1.7 if self._slow_mode else 1.0
+        self._agent = _RoutineRun(name)
+        self.sig_agent_running.emit(True)
+
+        if record_step is None:
+            work = lambda: run_routine(name, ui, agent_executor.cancel_event, flight_scale)
+        else:
+            work = lambda: record_routine(name, ui, agent_executor.cancel_event,
+                                          record_step, flight_scale)
+
+        async def _go():
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(None, work)
+                _log.info("routine %s%s: %s %s", name,
+                          "" if record_step is None else f" (edit, step {record_step})",
+                          result.status, result.message)
+            finally:
+                self._agent_finished()
+
+        asyncio.ensure_future(_go())
 
     def _agent_deps(self):
         from agent import executor as agent_executor
@@ -1414,6 +1584,17 @@ class CompanionManager(QObject):
         # return Located(int(round((found.x - shot.logical_left) * s + shot.physical_left)),
         #                int(round((found.y - shot.logical_top) * s + shot.physical_top)),
         #                label, None, "vision", False)
+
+    async def _say_and_wait(self, text: str):
+        """Queue a line like _agent_say and finish once it has been spoken
+        (routines wait on this so a step's line is never skipped)."""
+        self._agent_say(text)
+        speech = self._agent_speech
+        if speech is not None:
+            try:
+                await asyncio.shield(speech)
+            except Exception:
+                pass
 
     def _agent_say(self, text: str):
         """Show + speak without blocking the autopilot; lines are queued so

@@ -130,8 +130,34 @@ def _setup_logging():
         pass  # logging must never block startup
 
 
+_instance_mutex = None     # held for the whole run: one copy of the app at a time
+
+
+def _another_copy_running() -> bool:
+    """Two copies used to run side by side: every voice command was handled
+    twice (two taxi routines fighting over the mouse). A named mutex lets
+    only the first one start."""
+    global _instance_mutex
+    try:
+        import ctypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateMutexW.restype = ctypes.c_void_p
+        _instance_mutex = k.CreateMutexW(None, False, "Local\\Klipitauri.SingleInstance")
+        return ctypes.get_last_error() == 183           # ERROR_ALREADY_EXISTS
+    except Exception:
+        return False
+
+
 def main():
     _setup_logging()
+    if _another_copy_running():
+        logging.getLogger("clicky").warning("another copy is already running — exiting")
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, "კლიპიტაური უკვე ჩართულია.", "კლიპიტაური", 0x40)
+        except Exception:
+            pass
+        return
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -194,10 +220,13 @@ def main():
     manager.sig_point_hold.connect(overlay.set_point_hold)
     manager.sig_point_release.connect(overlay.release_point)
     manager.sig_point_retarget.connect(overlay.retarget)
+    manager.sig_point_speed.connect(overlay.set_flight_speed)
 
     # Whiteboard annotations (legacy per-shape signals)
     manager.sig_arrow.connect(overlay.add_arrow)
     manager.sig_circle.connect(overlay.add_circle)
+    manager.sig_circle_for.connect(overlay.add_circle)
+    manager.sig_circle_around.connect(overlay.circle_around)
     manager.sig_underline.connect(overlay.add_underline)
     manager.sig_label.connect(overlay.add_text)
     # Teaching drawings — generic shape channel with progressive animation
@@ -252,10 +281,11 @@ def main():
     manager.sig_agent_confirm_request.connect(panel.show_agent_prompt)
     manager.sig_agent_state.connect(panel.set_agent_state)
     panel.on_agent_reply.connect(manager.agent_reply)
-    # Stopping a run: the panel button turns into a stop button and the
-    # separate stop window appears for as long as the autopilot runs.
+    # Stopping a run: the panel button turns into a stop button. The separate
+    # stop window (top right) is no longer shown — the user asked for it to
+    # go; Esc, the island's × and „გაჩერდი“ still stop a run.
     manager.sig_agent_running.connect(panel.set_agent_running)
-    manager.sig_agent_running.connect(stop_window.set_running)
+    # manager.sig_agent_running.connect(stop_window.set_running)
     # Before each action: the panel docks opposite the target first (keeping
     # the stop window uncovered), then the stop window gets out of the way.
     panel.set_keep_clear_provider(
@@ -324,6 +354,9 @@ def main():
             manager._attached_docs.append(("recorded_workflow.txt", summary))
     tray.on_workflow_start.connect(_wf_start)
     tray.on_workflow_stop.connect(_wf_stop)
+
+    # Taxi routine edit mode
+    tray.on_routine_record.connect(lambda step: manager.record_routine("call_taxi", step))
 
     # Live collab
     tray.on_collab_start.connect(manager.collab_start_host)

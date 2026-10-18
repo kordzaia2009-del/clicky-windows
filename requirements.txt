@@ -66,3 +66,5 @@ SpeechRecognition==3.14.3
 # Autopilot input: typing (pyautogui) and controls by name (pywinauto)
 pyautogui==0.9.54
 pywinauto==0.6.9
+# UIA tree: address bar / page area (routines), icons for „მაჩვენე ხრომი“
+uiautomation>=2.0.0

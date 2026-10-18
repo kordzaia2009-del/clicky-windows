@@ -256,3 +256,141 @@ def test_island_close_stops_a_running_autopilot(mgr):
 def test_island_close_stops_an_answer(mgr):
     mgr.dismiss_from_island()                     # idle / speaking: just stop()
     assert mgr._cancel_flag is True
+
+
+def test_taxi_request_runs_the_routine_without_planning(mgr, monkeypatch):
+    import agent.routines as rt
+    monkeypatch.setattr(cfg, "agent_dry_run", False)
+    calls, release = [], threading.Event()
+
+    def fake_run(name, ui, cancel_event, flight_scale=1.0):
+        calls.append(name)
+        while not release.is_set() and not cancel_event.is_set():
+            time.sleep(0.01)
+        return rt.RoutineResult(True, "done")
+
+    monkeypatch.setattr(rt, "run_routine", fake_run)
+    assert call(mgr, "ტაქსი გამომიძახე") is True
+    assert FakePilot.instances == []                     # no planner call
+    assert wait_until(lambda: calls == ["call_taxi"])
+    assert mgr.agent_running
+    assert call(mgr, "გაჩერდი") is True                  # stop words reach it
+    assert wait_until(lambda: mgr._agent is None)
+    assert mgr._agent_lock.acquire(blocking=False)
+    mgr._agent_lock.release()
+
+
+def test_planner_chosen_routine_runs_it(mgr, monkeypatch):
+    import agent.routines as rt
+    monkeypatch.setattr(cfg, "agent_dry_run", False)
+    calls = []
+    monkeypatch.setattr(rt, "run_routine",
+                        lambda name, *a, **k: calls.append(name) or rt.RoutineResult(True, "done"))
+
+    async def plan_routine(self, text):
+        return PlanResult(is_task=True, routine="call_taxi")
+    monkeypatch.setattr(FakePilot, "plan_request", plan_routine)
+    assert call(mgr, "მანქანა მჭირდება ექიმთან") is True
+    assert wait_until(lambda: calls == ["call_taxi"])
+    assert wait_until(lambda: mgr._agent is None)
+
+
+def test_tray_edit_mode_records_the_chosen_step(mgr, monkeypatch):
+    import agent.routines as rt
+    monkeypatch.setattr(cfg, "agent_dry_run", False)
+    steps = []
+    monkeypatch.setattr(rt, "record_routine",
+                        lambda name, ui, cancel_event, step, *a: steps.append((name, step))
+                        or rt.RoutineResult(True, "done"))
+    mgr.record_routine("call_taxi", 2)                    # from the GUI thread
+    assert wait_until(lambda: steps == [("call_taxi", 2)])
+    assert wait_until(lambda: mgr._agent is None)
+    assert mgr._agent_lock.acquire(blocking=False)
+    mgr._agent_lock.release()
+
+
+def test_show_chrome_runs_in_any_mode_without_planning(mgr, monkeypatch):
+    import agent.show_icon as si
+    shown = []
+    monkeypatch.setattr(si, "show_icon", lambda app, ui, cancel, scale=1.0: shown.append(app) or True)
+    monkeypatch.setattr(cfg, "agent_mode", "guide")
+    run = lambda text: asyncio.run_coroutine_threadsafe(mgr._show_intercept(text), mgr._loop).result(5)
+    assert run("მაჩვენე ხრომი") is True and shown == ["chrome"]
+    assert run("მაჩვენე გუგლში როგორ ვეძებო") is False     # normal flow keeps it
+    assert FakePilot.instances == []
+
+
+def test_show_chrome_waits_while_the_autopilot_runs(mgr, monkeypatch):
+    import agent.show_icon as si
+    shown = []
+    monkeypatch.setattr(si, "show_icon", lambda *a, **k: shown.append(a) or True)
+    assert call(mgr, "გახსენი მეილი") is True
+    assert wait_until(lambda: mgr._agent is not None)
+    run = asyncio.run_coroutine_threadsafe(mgr._show_intercept("მაჩვენე ხრომი"), mgr._loop).result(5)
+    assert run is False and shown == []
+
+
+class _WhichLLM:
+    def __init__(self, reply):
+        self.reply, self.calls = reply, 0
+
+    async def stream_response(self, **kw):
+        self.calls += 1
+        yield self.reply
+
+
+def _which_setup(mgr, monkeypatch, reply):
+    import agent.show_icon as si
+    icons = [si.Icon("Google Chrome", (1155, 1020, 1210, 1080), "taskbar")]
+    monkeypatch.setattr(si.finder, "icons", lambda: icons)
+    llm = _WhichLLM(reply)
+    monkeypatch.setattr(mgr, "_get_llm", lambda: llm)
+    said, rings = [], []
+
+    async def reply_local(msg):
+        said.append(msg)
+    monkeypatch.setattr(mgr, "_reply_local", reply_local)
+    from PyQt6.QtCore import Qt
+    mgr.sig_circle_around.connect(lambda x, y, r, hold: rings.append((x, y, r, hold)),
+                                  Qt.ConnectionType.DirectConnection)   # no Qt loop in tests
+    run = lambda text: asyncio.run_coroutine_threadsafe(mgr._which_intercept(text), mgr._loop).result(5)
+    return run, llm, said, rings
+
+
+def test_which_app_circles_the_icon_and_explains_it(mgr, monkeypatch):
+    run, llm, said, rings = _which_setup(
+        mgr, monkeypatch, '{"asked_app": true, "index": 1, "explain": "აი, ეს არის Google Chrome."}')
+    assert run("რომელია ხრომი?") is True
+    assert said == ["აი, ეს არის Google Chrome."]
+    assert wait_until(lambda: len(rings) == 1)
+    x, y, r, hold = rings[0]
+    cx, cy = agent_executor.to_logical(1182.5, 1050)
+    assert (x, y) == (pytest.approx(cx), pytest.approx(cy)) and r > 20 and hold == mgr.WHICH_HOLD_S
+    assert FakePilot.instances == []
+
+
+def test_which_app_leaves_other_questions_to_the_normal_flow(mgr, monkeypatch):
+    run, llm, said, rings = _which_setup(
+        mgr, monkeypatch, '{"asked_app": false, "index": null, "explain": ""}')
+    assert run("სად არის თბილისი?") is False             # model: not about an app
+    assert run("რომელი საათია?") is False                 # no cue word: no model call
+    assert llm.calls == 1 and said == [] and rings == []
+
+
+def test_which_app_says_when_it_is_not_on_screen(mgr, monkeypatch):
+    run, _llm, said, rings = _which_setup(
+        mgr, monkeypatch, '{"asked_app": true, "index": null, "explain": "ვორდი ეკრანზე ვერ ვიპოვე."}')
+    assert run("სად არის ვორდი?") is True
+    assert said == ["ვორდი ეკრანზე ვერ ვიპოვე."] and rings == []
+
+
+def test_which_app_still_circles_when_the_model_is_down(mgr, monkeypatch):
+    run, llm, said, rings = _which_setup(mgr, monkeypatch, "")
+
+    async def down(**kw):
+        raise ConnectionError("All connection attempts failed")
+        yield ""                                          # an async generator
+    llm.stream_response = down
+    assert run("ბაბუ სად არის ხრომ") is True
+    assert wait_until(lambda: len(rings) == 1)            # circled from the code match
+    assert said == ["აი, ეს არის Google Chrome."]

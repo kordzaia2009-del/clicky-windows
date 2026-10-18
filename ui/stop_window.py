@@ -148,11 +148,5 @@ class StopWindow(QWidget):
         """Above the app's other topmost windows (the panel), without focus."""
         if not self.isVisible():
             return
-        try:
-            import ctypes
-            ctypes.windll.user32.SetWindowPos(
-                int(self.winId()), -1, 0, 0, 0, 0,     # HWND_TOPMOST
-                0x0001 | 0x0002 | 0x0010,               # NOSIZE | NOMOVE | NOACTIVATE
-            )
-        except Exception:
-            pass
+        from ui.topmost import raise_topmost
+        raise_topmost(self.winId())

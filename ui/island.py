@@ -284,12 +284,8 @@ class IslandWindow(QWidget):
     def keep_on_top(self):
         if not self.isVisible():
             return
-        try:
-            import ctypes
-            ctypes.windll.user32.SetWindowPos(int(self.winId()), -1, 0, 0, 0, 0,
-                                              0x0001 | 0x0002 | 0x0010)
-        except Exception:
-            pass
+        from ui.topmost import raise_topmost
+        raise_topmost(self.winId())
 
     # animation plumbing
     def _slide_to(self, target: QPoint, ms: int, curve):

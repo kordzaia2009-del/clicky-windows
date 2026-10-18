@@ -202,6 +202,10 @@ _PHASE_FOLLOW    = "follow"
 _PHASE_FLYING    = "flying"
 _PHASE_DWELLING  = "dwelling"
 _PHASE_RETURNING = "returning"
+_PHASE_ORBITING  = "orbiting"   # circle_around(): the pen tip traces a ring
+
+ORBIT_SECONDS   = 1.2           # one lap round the icon
+PEN_TIP_RADIUS  = 7.0           # what's left of the pointer while the 🍇 is hidden
 
 
 def render_grape_pixmap(dpr: float = 1.0) -> QPixmap:
@@ -283,6 +287,12 @@ class CursorOverlay(QWidget):
         self._fly_t0: float = 0.0
         self._fly_duration: float = 1.8
         self._flight_scale: float = 1.0
+        self._speed_mult: float = 1.0      # < 1 = faster flights (routines)
+        # circle_around(): (x, y, radius, hold_s) of the ring being traced,
+        # and whether the 🍇 is hidden (only a golden pen tip shows)
+        self._orbit: Optional[tuple] = None
+        self._orbit_t0: float = 0.0
+        self._hide_emoji: bool = False
         self._dwell_until: float = 0.0
         # When True, dwell never expires — manager releases after TTS finishes
         self._hold_dwell: bool = False
@@ -450,6 +460,20 @@ class CursorOverlay(QWidget):
         self._lock_timer.stop()   # dwell controlled by phase machine, not timer
         self._begin_flight(self._display_pos, self._locked_pos, _PHASE_FLYING)
 
+    def circle_around(self, x: float, y: float, radius: float, hold_s: float = 3.0):
+        """Fly to the top of a circle round (x, y), hide the 🍇 and trace the
+        circle with a golden pen tip (the ring stays drawn), wait hold_s,
+        then fly back to the cursor with the 🍇 again. Logical px."""
+        self._orbit = (float(x), float(y), max(8.0, float(radius)), max(0.0, float(hold_s)))
+        start = QPointF(x, y - self._orbit[2])
+        self._locked_pos = start
+        self._arrow_target = None
+        self._bubble_text = ""
+        self._ring = None
+        self._hold_dwell = False
+        self._lock_timer.stop()
+        self._begin_flight(self._display_pos, start, _PHASE_FLYING)
+
     def retarget(self, x: float, y: float):
         """Nudge the current pointing target (e.g. after snapping it onto the
         matching on-screen text) without restarting the whole gesture."""
@@ -489,6 +513,10 @@ class CursorOverlay(QWidget):
         """Doubles flight + dwell duration so students can track the motion."""
         self._slow_mode = enabled
 
+    def set_flight_speed(self, mult: float):
+        """Flight time multiplier: 1.0 = teaching pace; routines fly faster."""
+        self._speed_mult = max(0.05, float(mult))
+
     def set_point_hold(self, hold: bool):
         """Called by manager when TTS starts (True) / ends (False).
         While held, dwell never auto-expires — the buddy stays on the element
@@ -507,6 +535,9 @@ class CursorOverlay(QWidget):
         # Fade ring on next paint
         self._ring = None
         self._arrow_target = None
+        if self._flight_phase == _PHASE_ORBITING:   # cut the lap short
+            self._flight_phase = _PHASE_DWELLING
+            self._dwell_until = 0.0
 
     # ── Teaching annotations ─────────────────────────────────────────────────
 
@@ -576,7 +607,7 @@ class CursorOverlay(QWidget):
         dur = max(FLY_DURATION_MIN, min(FLY_DURATION_MAX, FLY_DURATION_MIN + dist / 700.0))
         if phase == _PHASE_RETURNING:
             dur = RETURN_DURATION
-        dur *= mult
+        dur *= mult * self._speed_mult
         # Arc up over the midpoint
         mid = QPointF((start.x() + end.x()) / 2, (start.y() + end.y()) / 2)
         arc_height = min(dist * 0.22, 90.0)
@@ -588,21 +619,37 @@ class CursorOverlay(QWidget):
         self._flight_phase = phase
         self._vel = QPointF(0, 0)
 
+    def _start_orbit(self):
+        """Arrived at the top of the ring: hide the 🍇 and start the lap. The
+        ring is an ordinary circle annotation drawn in step with the pen."""
+        x, y, r, hold_s = self._orbit
+        now = time.monotonic()
+        self._flight_phase = _PHASE_ORBITING
+        self._orbit_t0 = now
+        self._hide_emoji = True
+        self._flight_scale = 1.0
+        self._rotation_deg = TRI_ROTATION_DEG
+        self._annotations.append({"kind": "circle", "x": x, "y": y, "r": r,
+                                  "color": "blue", "start": now, "dur": ORBIT_SECONDS,
+                                  "ttl": ORBIT_SECONDS + hold_s + RETURN_DURATION})
+
+    def _tick_orbit(self):
+        x, y, r, hold_s = self._orbit
+        u = min(1.0, (time.monotonic() - self._orbit_t0) / ORBIT_SECONDS)
+        tx, ty = _stroke_tip({"kind": "circle", "x": x, "y": y, "r": r}, u)
+        self._display_pos = QPointF(tx, ty)
+        if u >= 1.0:                        # lap done: rest on the ring
+            self._locked_pos = QPointF(tx, ty)
+            self._flight_phase = _PHASE_DWELLING
+            self._dwell_until = time.monotonic() + hold_s
+
     def keep_on_top(self):
         """Put the overlay above every other topmost window, including the
         app's own panel and dialogs, without taking keyboard focus."""
         if not self.isVisible():
             return
-        try:
-            import ctypes
-            HWND_TOPMOST = -1
-            SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
-            ctypes.windll.user32.SetWindowPos(
-                int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-            )
-        except Exception:
-            pass   # non-Windows / no window handle yet — nothing to do
+        from ui.topmost import raise_topmost
+        raise_topmost(self.winId())
 
     def hide_cursor(self):
         self._release_lock()
@@ -631,6 +678,8 @@ class CursorOverlay(QWidget):
         self._hold_dwell = False
         self._ring = None
         self._arrow_target = None
+        self._orbit = None
+        self._hide_emoji = False
 
     def _tick_extras(self):
         now = time.monotonic()
@@ -648,7 +697,7 @@ class CursorOverlay(QWidget):
             elif _playback is not None:
                 gen, progress = _playback.playback_progress()
                 self._say_text = revealed_text(self._say_line, progress if gen > self._say_gen else 0.0)
-        if self._flight_phase in (_PHASE_FLYING, _PHASE_RETURNING):
+        if self._flight_phase in (_PHASE_FLYING, _PHASE_RETURNING, _PHASE_ORBITING):
             self._trail.append((now, self._display_pos.x(), self._display_pos.y()))
         if self._trail:
             self._trail = [pt for pt in self._trail if now - pt[0] < TRAIL_SECONDS]
@@ -685,7 +734,9 @@ class CursorOverlay(QWidget):
                 self._bubble_alpha = min(1.0, lp * 1.4)
                 self._bubble_scale = 0.5 + lp * 0.5
             if lp >= 1.0:
-                if self._flight_phase == _PHASE_FLYING:
+                if self._flight_phase == _PHASE_FLYING and self._orbit is not None:
+                    self._start_orbit()
+                elif self._flight_phase == _PHASE_FLYING:
                     self._flight_phase = _PHASE_DWELLING
                     if self._hold_dwell:
                         self._dwell_until = float("inf")
@@ -700,6 +751,12 @@ class CursorOverlay(QWidget):
             self.update()
             return
 
+        if self._flight_phase == _PHASE_ORBITING:
+            self._tick_orbit()
+            self._phase += 0.10
+            self.update()
+            return
+
         if self._flight_phase == _PHASE_DWELLING:
             # Gentle breathing pulse while the LLM explains
             breathe = 1.0 + 0.05 * math.sin(self._phase * 1.4)
@@ -709,6 +766,8 @@ class CursorOverlay(QWidget):
             # Stay planted on the element
             self._display_pos = QPointF(self._locked_pos.x(), self._locked_pos.y())
             if time.monotonic() >= self._dwell_until:
+                self._hide_emoji = False            # the 🍇 is back for the return
+                self._orbit = None
                 cursor_target = QPointF(real.x() + OFFSET_X, real.y() + OFFSET_Y)
                 self._begin_flight(self._display_pos, cursor_target, _PHASE_RETURNING)
                 # Fade bubble out during return
@@ -1096,6 +1155,9 @@ class CursorOverlay(QWidget):
         return self._grape_pm
 
     def _draw_grape(self, p, cx, cy):
+        if self._hide_emoji:
+            self._draw_pen_tip(p, cx, cy)
+            return
         pm = self._grape_pixmap()
         half = pm.width() / pm.devicePixelRatio() / 2
         p.save()
@@ -1110,6 +1172,15 @@ class CursorOverlay(QWidget):
                 p.drawEllipse(QPointF(0, 0), GRAPE_RADIUS * r_mul, GRAPE_RADIUS * r_mul)
         p.drawPixmap(QPointF(-half, -half), pm)
         p.restore()
+
+    def _draw_pen_tip(self, p, cx, cy):
+        """The pointer with its 🍇 hidden: a small glowing golden dot."""
+        glow = QColor(*TRAIL_GOLD)
+        p.setPen(Qt.PenStyle.NoPen)
+        for r_mul, a in ((2.4, 40), (1.6, 90), (1.0, 255)):
+            glow.setAlpha(a)
+            p.setBrush(glow)
+            p.drawEllipse(QPointF(cx, cy), PEN_TIP_RADIUS * r_mul, PEN_TIP_RADIUS * r_mul)
 
     def _draw_listen_ring(self, p, cx, cy):
         """Listening: a thin ring that breathes with the voice."""

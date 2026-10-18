@@ -31,6 +31,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, List, Optional
 
+from agent.routines import ROUTINES
 from ai.base_provider import BaseLLMProvider, Message
 
 if TYPE_CHECKING:   # screen.capture pulls in mss/PIL; only needed for typing
@@ -69,6 +70,7 @@ class PlanResult:
     is_task: bool
     goals: List[Goal] = field(default_factory=list)
     error: Optional[str] = None     # why we fell back; None for a real plan
+    routine: Optional[str] = None   # a code-only routine (agent/routines.py) instead of goals
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -114,6 +116,10 @@ RULES
 6. If a screenshot is attached, use it only to choose sensible steps (for
    example, skip opening the browser if it is already open). Never refer
    to positions on it.
+7. Some tasks have a ready-made routine. When the request is one of these,
+   reply ONLY {"is_task": true, "routine": "<name>", "goals": []}:
+   - call_taxi: the person wants a taxi or a car to come and pick them up
+     („ტაქსი გამომიძახე“, „მანქანა მჭირდება სახლამდე“).
 
 EXAMPLES
 User: ჩართე იუთუბი და მოძებნე ქართული სიმღერები
@@ -126,6 +132,9 @@ User: ჩართე იუთუბი და მოძებნე ქარ�
   {"id": 1, "title": "დააჭირეთ ძებნის ველს", "done_when": "ძებნის ველში ციმციმებს კურსორი", "private": false},
   {"id": 2, "title": "ჩაწერეთ: ქართული სიმღერები", "done_when": "ტექსტი ჩაწერილია ძებნის ველში", "private": false},
   {"id": 3, "title": "დააჭირეთ ძებნის ღილაკს", "done_when": "ეკრანზე ჩანს სიმღერების სია", "private": false}]}]}
+
+User: მანქანა გამომიგზავნე, ექიმთან უნდა წავიდე
+{"is_task": true, "routine": "call_taxi", "goals": []}
 
 User: რა ამინდია დღეს?
 {"is_task": false, "goals": []}"""
@@ -178,6 +187,11 @@ def plan_from_dict(data: dict) -> PlanResult:
         raise PlanParseError('"is_task" must be true or false')
     if not is_task:
         return PlanResult(is_task=False, goals=[])
+    routine = data.get("routine")
+    if routine is not None:
+        if routine not in ROUTINES:
+            raise PlanParseError(f'unknown routine {routine!r}; use one of {sorted(ROUTINES)} or leave it out')
+        return PlanResult(is_task=True, goals=[], routine=routine)
 
     raw_goals = data.get("goals")
     if not isinstance(raw_goals, list) or not raw_goals:

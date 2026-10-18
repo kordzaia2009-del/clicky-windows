@@ -52,6 +52,7 @@ class TrayManager(QObject):
     on_collab_join        = pyqtSignal()
     on_workflow_start     = pyqtSignal()
     on_workflow_stop      = pyqtSignal()
+    on_routine_record     = pyqtSignal(int)     # taxi edit mode: 0 = all steps, k = step k
     on_journal_open       = pyqtSignal()
     on_attach_doc         = pyqtSignal()
     on_run_setup          = pyqtSignal()
@@ -105,6 +106,31 @@ class TrayManager(QObject):
         self._build_menu()
         self._tray.activated.connect(self._on_activated)
         self._tray.show()
+
+    def _fill_taxi_menu(self, menu):
+        """Record every step, re-record one step, add one, or open the file."""
+        from agent.routines import load_routine
+        menu.clear()
+        steps = load_routine("call_taxi")["steps"]
+        rec_all = menu.addAction("ყველა ნაბიჯის თავიდან ჩაწერა (ბოლოს Enter)")
+        rec_all.triggered.connect(lambda _=False: self.on_routine_record.emit(0))
+        menu.addSeparator()
+        for i, s in enumerate(steps, start=1):
+            act = menu.addAction(f"ნაბიჯი {i} შეცვლა  ({s['x']}, {s['y']})")
+            act.triggered.connect(lambda _=False, k=i: self.on_routine_record.emit(k))
+        add = menu.addAction("ახალი ნაბიჯის დამატება")
+        add.triggered.connect(lambda _=False, k=len(steps) + 1: self.on_routine_record.emit(k))
+        menu.addSeparator()
+        open_file = menu.addAction("ფაილის გახსნა (JSON)")
+        open_file.triggered.connect(self._open_taxi_file)
+
+    def _open_taxi_file(self):
+        import os
+        from agent.routines import ensure_routine_file
+        try:
+            os.startfile(ensure_routine_file("call_taxi"))
+        except Exception as e:
+            self.show_notification("ფაილი ვერ გაიხსნა", str(e))
 
     def _build_menu(self):
         menu = QMenu()
@@ -272,6 +298,11 @@ class TrayManager(QObject):
         wf_start.triggered.connect(self.on_workflow_start)
         wf_stop  = wf_menu.addAction("შეწყვეტა და კლიპიტაურისთვის გაგზავნა")
         wf_stop.triggered.connect(self.on_workflow_stop)
+
+        # ── Taxi routine: edit mode (rebuilt each time it opens) ──
+        taxi_menu = menu.addMenu("ტაქსის ნაბიჯები (რედაქტირება)")
+        taxi_menu.aboutToShow.connect(lambda m=taxi_menu: self._fill_taxi_menu(m))
+        self._fill_taxi_menu(taxi_menu)
 
         # ── Live collaboration ──
         # NOTE: WebRTC signalling server isn't shipped yet, so this whole
