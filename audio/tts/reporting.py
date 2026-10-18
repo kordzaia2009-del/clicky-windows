@@ -26,12 +26,25 @@ class ReportingTTS:
             pass                          # a UI hiccup must never stop speech
 
     async def speak(self, text: str):
+        import time
+        from timing import mark, since_ms
+        t0 = time.perf_counter()
         if text and text.strip():
             self._report(text.strip())
         try:
             return await self._inner.speak(text)
         finally:
             self._report("")
+            start_ms = None
+            try:
+                from audio import playback
+                started = playback.last_start_time()
+                if started >= t0:
+                    start_ms = round((started - t0) * 1000)   # synthesis + decode
+            except Exception:
+                pass
+            mark("tts.speak", since_ms(t0), start_speaking_ms=start_ms,
+                 chars=len(text or ""), provider=type(self._inner).__name__)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)

@@ -324,8 +324,12 @@ class Autopilot:
         self.request = user_text
         self.cancel_event.clear()
         self._set(State.PLANNING)
-        shot = await self._screen()
-        result = await self.d.plan(user_text, shot)
+        from timing import timed
+        with timed("autopilot.planning_screenshot"):
+            shot = await self._screen()
+        with timed("autopilot.planner") as tm:
+            result = await self.d.plan(user_text, shot)
+            tm["is_task"] = result.is_task
         if not result.is_task:
             self._set(State.IDLE, "not a task")
         return result
@@ -438,6 +442,8 @@ class Autopilot:
             raise _Stop(State.CANCELLED, SAY_CANCELLED)
 
     async def _decide(self, goal, steps, i, history, shot) -> Optional[Decision]:
+        from timing import mark, since_ms
+        t_dec = time.perf_counter()
         user = self._decision_prompt(goal, steps, i, history)
         image = shot.base64_jpeg if shot is not None else None
         error = ""
@@ -452,7 +458,11 @@ class Autopilot:
                 log.warning("decision call failed: %s", e)
                 return None
             try:
-                return parse_decision(raw)
+                decision = parse_decision(raw)
+                mark("autopilot.decide", since_ms(t_dec), step=i + 1, attempts=attempt,
+                     step_done=decision.step_done,
+                     action=(decision.action or {}).get("type"))
+                return decision
             except DecisionError as e:
                 error = str(e)
                 log.warning("decision rejected (attempt %d): %s", attempt, error)
@@ -558,19 +568,27 @@ class Autopilot:
     async def _settle(self, before) -> bool:
         """Wait until two consecutive screenshots agree (or time out); report
         whether the screen differs from `before`."""
+        from timing import timed
+        with timed("autopilot.settle", timeout_s=self.s.settle_timeout_s) as tm:
+            changed, samples, timed_out = await self._settle_inner(before)
+            tm.update(changed=changed, samples=samples, timed_out=timed_out)
+        return changed
+
+    async def _settle_inner(self, before):
         deadline = time.monotonic() + self.s.settle_timeout_s
-        prev, stable = before, 0
+        prev, stable, samples = before, 0, 0
         while time.monotonic() < deadline:
             self._check_cancel()
             await self.d.sleep(self.s.settle_interval_s)
             cur = await self._screen()
+            samples += 1
             if cur is None:
                 break
             stable = stable + 1 if self.d.image_diff(prev, cur) < self.s.stable_eps else 0
             prev = cur
             if stable >= 2:
-                break
-        return self.d.image_diff(before, prev) > self.s.change_eps
+                return self.d.image_diff(before, prev) > self.s.change_eps, samples, False
+        return self.d.image_diff(before, prev) > self.s.change_eps, samples, True
 
     async def _replan(self, goal: Goal, steps: List[Step], i: int,
                       by_user: bool = False) -> List[Step]:

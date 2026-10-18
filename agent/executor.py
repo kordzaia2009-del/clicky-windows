@@ -556,7 +556,11 @@ class _Run:
         self.cb.point_hold(True)
         self.cb.point_at(float(lx), float(ly), where.name)
         self.pointing = True
-        self.wait(self.flight_seconds(lx, ly) + HOLD_S)
+        flight = self.flight_seconds(lx, ly)
+        from timing import timed
+        with timed("executor.pointer_wait", action=self.type,
+                   flight_ms=round(flight * 1000), hold_ms=round(HOLD_S * 1000)):
+            self.wait(flight + HOLD_S)          # actual time includes any pause
 
     def refresh(self, where: _Resolved) -> _Resolved:
         """Re-read an element's position right before acting: a pause (the
@@ -637,8 +641,11 @@ class _Run:
         if self.dry:
             return self.result("dry_run", "would click", where=where,
                                method="uia-or-mouse" if where.element is not None else "mouse")
+        from timing import timed
         if count == 1 and where.element is not None:
-            method = win.uia_activate(where.element)
+            with timed("executor.input", action="invoke") as tm:
+                method = win.uia_activate(where.element)
+                tm["method"] = method
             if method:
                 return self.result("done", f"activated {where.name!r}", method, where)
         self.check_not_ours(where)
@@ -647,7 +654,8 @@ class _Run:
         got = win.cursor_pos()
         if abs(got[0] - where.px) > 1 or abs(got[1] - where.py) > 1:
             raise OSError(f"cursor landed at {got}, not ({where.px}, {where.py}) — DPI mismatch?")
-        win.click(count)
+        with timed("executor.input", action=self.type, method="mouse"):
+            win.click(count)
         return self.result("done", "clicked" if count == 1 else "double-clicked",
                            "mouse", where)
 
@@ -673,10 +681,15 @@ class _Run:
         else:
             chunks = [text[i:i + TYPE_CHUNK] for i in range(0, len(text), TYPE_CHUNK)]
         method = "unicode"
+        import time as _time
+        from timing import mark, since_ms
+        t_type = _time.perf_counter()
         try:
             for chunk in chunks:
                 self.wait(0.03)                  # cancel/pause between chunks
                 method = win.type_text(chunk)
+            mark("executor.input", since_ms(t_type), action="type", method=method,
+                 chars=len(text), chunks=len(chunks))
         except Exception as e:
             if type(e).__name__ == "FailSafeException":     # pyautogui: mouse in a corner
                 raise _Cancelled() from e
@@ -744,9 +757,13 @@ class _Run:
             return self.result("failed", f"unknown action type {self.type!r}")
         self.log("start", action_spec={k: v for k, v in self.action.items()
                                        if k not in ("text",)})
+        from timing import timed
         try:
             self.check_cancel()
-            return handlers[self.type]()
+            with timed("executor.total", action=self.type, dry_run=self.dry) as tm:
+                result = handlers[self.type]()
+                tm["status"] = result.status
+            return result
         except _Cancelled:
             return self.result("cancelled", "stopped by the user (Esc)")
         except _Refused as e:

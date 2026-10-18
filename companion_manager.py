@@ -1243,7 +1243,10 @@ class CompanionManager(QObject):
                 Settings(dry_run=cfg.agent_dry_run,
                          confirm_keywords=tuple(cfg.confirm_keywords)),
             )
-            plan = await pilot.plan_request(transcript)
+            from timing import timed
+            with timed("do_mode.plan_request") as tm:   # runs for every question in "do" mode
+                plan = await pilot.plan_request(transcript)
+                tm["is_task"] = plan.is_task
         except Exception:
             _log.exception("autopilot planning failed")
             self._agent_finished()
@@ -1309,12 +1312,19 @@ class CompanionManager(QObject):
             return await planner_plan(text, shot, llm=self._get_llm(), model=self._current_model)
 
         async def decide(system, user, image):
+            from timing import mark, since_ms
+            t0, first = time.perf_counter(), None
             parts = []
             async for chunk in self._get_llm().stream_response(
                 user_text=user, screenshots_b64=[image] if image else [],
                 history=[], system_prompt=system, model=self._current_model,
             ):
+                if first is None:
+                    first = since_ms(t0)
                 parts.append(chunk)
+            mark("autopilot.model_call", since_ms(t0),
+                 first_token_ms=round(first) if first is not None else None,
+                 image=bool(image), model=self._current_model or "default")
             return "".join(parts)
 
         def execute(action, shot):
@@ -1339,12 +1349,17 @@ class CompanionManager(QObject):
         from agent.autopilot import Located
         from ai.hybrid_pointer import find_target
         from ai.pwa_locator import find_control
-        found = find_control(label)
+        from timing import mark, since_ms, timed
+        t_chain = time.perf_counter()
+        with timed("locator.pywinauto", label=label) as tm:
+            found = find_control(label)
+            tm["hit"] = found is not None
         if found is not None:
             cx, cy = found.center
+            mark("locator.total", since_ms(t_chain), label=label, answered="pywinauto")
             return Located(cx, cy, found.name, found.wrapper, "pywinauto", found.is_password)
         try:
-            t = find_target(label, screenshot=shot, skip_vision=True)
+            t = find_target(label, screenshot=shot, skip_vision=True)   # logs uia / ocr
         except Exception:
             t = None
         if t is not None and t.source in ("uia", "ocr"):
@@ -1354,8 +1369,10 @@ class CompanionManager(QObject):
                     is_pw = bool(t.element.IsPassword)
                 except Exception:
                     pass
+            mark("locator.total", since_ms(t_chain), label=label, answered=t.source)
             return Located(int(t.x), int(t.y), t.label or label, t.element, t.source, is_pw)
         if shot is None or self._loop is None:
+            mark("locator.total", since_ms(t_chain), label=label, answered=None)
             return None
         kwargs = dict(
             screenshot_jpeg_b64=shot.base64_jpeg, original_width=shot.width,
@@ -1365,19 +1382,27 @@ class CompanionManager(QObject):
             screen_index=shot.index, user_question=f"Where is: {label}",
         )
         found = None
+        answered = None
         try:
             if _computer_use_available():
                 from ai.element_locator import detect_element
-                found = asyncio.run_coroutine_threadsafe(
-                    detect_element(**kwargs), self._loop).result(timeout=40)
+                with timed("locator.computer_use", label=label) as tm:
+                    found = asyncio.run_coroutine_threadsafe(
+                        detect_element(**kwargs), self._loop).result(timeout=40)
+                    tm["hit"] = found is not None
+                answered = "computer_use" if found is not None else None
             if found is None:
                 from ai.universal_locator import detect_element_universal
-                found = asyncio.run_coroutine_threadsafe(
-                    detect_element_universal(llm=self._get_llm(), model=self._current_model,
-                                             **kwargs), self._loop).result(timeout=60)
+                with timed("locator.universal", label=label) as tm:
+                    found = asyncio.run_coroutine_threadsafe(
+                        detect_element_universal(llm=self._get_llm(), model=self._current_model,
+                                                 **kwargs), self._loop).result(timeout=60)
+                    tm["hit"] = found is not None
+                answered = "universal" if found is not None else None
         except Exception:
             _log.exception("vision locator failed for %r", label)
             found = None
+        mark("locator.total", since_ms(t_chain), label=label, answered=answered)
         if found is None:
             return None
         s = shot.dpi_scale or 1.0       # Detected is logical; the executor wants physical

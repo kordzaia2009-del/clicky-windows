@@ -70,10 +70,15 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
     to convert detection coords back into logical screen space."""
     dpi = _query_dpi_scale()
     results = []
+    import time
+    from timing import mark, since_ms
+    t_all = time.perf_counter()
     with mss.mss() as sct:
         # mss monitor index 0 is the combined virtual screen; 1+ are real monitors
         for i, monitor in enumerate(sct.monitors[1:], start=1):
+            t_grab = time.perf_counter()
             raw = sct.grab(monitor)
+            grab_ms = since_ms(t_grab)
             img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
             phys_w, phys_h = img.width, img.height
@@ -89,8 +94,12 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
                 )
 
             buf = io.BytesIO()
+            t_enc = time.perf_counter()
             img.save(buf, format="JPEG", quality=75, optimize=True)
             encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+            mark("capture.monitor", grab_ms + since_ms(t_enc), monitor=i,
+                 grab_ms=round(grab_ms), encode_ms=round(since_ms(t_enc)),
+                 jpeg_kb=len(encoded) * 3 // 4 // 1024)
 
             results.append(ScreenShot(
                 index=i,
@@ -106,6 +115,7 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
                 logical_top=int(round(phys_top  / dpi)),
             ))
 
+    mark("capture.all_screens", since_ms(t_all), monitors=len(results))
     return results
 
 

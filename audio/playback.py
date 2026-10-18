@@ -26,6 +26,7 @@ _playing = False
 _level = 0.0          # RMS of the 50 ms block being played, 0..~0.5
 _progress = 0.0       # how much of the current clip has played, 0..1
 _generation = 0       # bumps at the start of every clip
+_last_start = 0.0     # perf_counter() when the last clip started playing
 
 
 def is_playing() -> bool:
@@ -36,6 +37,11 @@ def is_playing() -> bool:
 def speaking_level() -> float:
     """Loudness of the block playing now (0 when silent)."""
     return _level if _playing else 0.0
+
+
+def last_start_time() -> float:
+    """perf_counter() timestamp of the most recent clip's first audio."""
+    return _last_start
 
 
 def playback_progress() -> tuple:
@@ -88,7 +94,7 @@ def _blocking_play_chunked(pcm: np.ndarray, sr: int) -> None:
     """Play PCM through an OutputStream, polling _stop_event between blocks
     so cancellation takes effect within ~50 ms instead of 'when the buffer
     runs out'."""
-    global _playing, _level, _progress, _generation
+    global _playing, _level, _progress, _generation, _last_start
     if pcm.size == 0:
         return
 
@@ -97,6 +103,8 @@ def _blocking_play_chunked(pcm: np.ndarray, sr: int) -> None:
 
     _playing, _level, _progress = True, 0.0, 0.0
     _generation += 1
+    import time as _time
+    _last_start = _time.perf_counter()
     try:
         with sd.OutputStream(samplerate=sr, channels=1, dtype="float32") as stream:
             i = 0
@@ -136,12 +144,18 @@ async def play_mp3_async(mp3_bytes: bytes) -> None:
 
     _arm_audio()
 
+    import time as _time
+    from timing import mark, since_ms
     loop = asyncio.get_running_loop()
+    t_dec = _time.perf_counter()
     pcm, sr = await loop.run_in_executor(None, decode_mp3_to_pcm, mp3_bytes)
+    mark("tts.decode", since_ms(t_dec), audio_s=round(pcm.size / sr, 2) if sr else 0)
     if pcm.size == 0:
         return
 
     if _stop_event.is_set():
         return  # cancelled while we were decoding
 
+    t_play = _time.perf_counter()
     await loop.run_in_executor(None, _blocking_play_chunked, pcm, sr)
+    mark("tts.playback", since_ms(t_play))

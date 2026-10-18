@@ -230,6 +230,9 @@ def parse_plan(text: str) -> PlanResult:
 
 async def _collect(llm: BaseLLMProvider, user_text: str, images: List[str],
                    history: List[Message], model: Optional[str]) -> str:
+    import time
+    from timing import mark, since_ms
+    t0, first = time.perf_counter(), None
     parts = []
     async for chunk in llm.stream_response(
         user_text=user_text,
@@ -238,7 +241,12 @@ async def _collect(llm: BaseLLMProvider, user_text: str, images: List[str],
         system_prompt=SYSTEM_PROMPT,
         model=model,
     ):
+        if first is None:
+            first = since_ms(t0)
         parts.append(chunk)
+    mark("planner.model_call", since_ms(t0),
+         first_token_ms=round(first) if first is not None else None,
+         images=len(images), retry=bool(history))
     return "".join(parts)
 
 

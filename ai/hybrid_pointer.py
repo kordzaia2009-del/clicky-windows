@@ -329,15 +329,21 @@ def find_target(
     if not query or not query.strip():
         return None
 
+    from timing import timed
+
     # Tier 1: UIA — fast, free, often perfect
     if not skip_uia:
-        t = _find_via_uia(query)
+        with timed("locator.uia", label=query) as tm:
+            t = _find_via_uia(query)
+            tm["hit"] = t is not None and t.confidence >= 0.5
         if t is not None and t.confidence >= 0.5:
             return t
 
     # Tier 2: OCR — text-based fallback for canvas apps
     if not skip_ocr:
-        t = _find_via_ocr(query, pil_image=pil_image)
+        with timed("locator.ocr", label=query) as tm:
+            t = _find_via_ocr(query, pil_image=pil_image)
+            tm["hit"] = t is not None and t.confidence >= 0.5
         if t is not None and t.confidence >= 0.5:
             return t
 
